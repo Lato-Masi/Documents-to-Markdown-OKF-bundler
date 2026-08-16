@@ -1,0 +1,6 @@
+{
+  "name": "Document to Markdown Converter",
+  "description": "Convert PDFs, images, DOCX files, spreadsheets, and documents into clean Markdown, Open Knowledge Format (OKF v0.2) bundles, Agent Skills (agentskills.io / Claude standards), NLP-enriched entities, and interactive knowledge graphs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

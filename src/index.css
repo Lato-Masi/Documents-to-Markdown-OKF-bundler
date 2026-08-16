@@ -1,0 +1,226 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Helvetica Neue", Arial, "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Helvetica Neue", Arial, "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Base App Overrides */
+body {
+  font-family: var(--font-sans);
+  background-color: #fcfcfc;
+  color: #0f172a;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+/* Hide scrollbar utility for clean mobile horizontal tab scrolling */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Markdown Rendering Container Styles - Clean Minimalist */
+.markdown-body {
+  font-family: var(--font-sans);
+  line-height: 1.7;
+}
+.markdown-body h1 {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 1.75rem;
+  margin-bottom: 1rem;
+  color: #000000;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 0.4rem;
+}
+.markdown-body h2 {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: #111111;
+  border-bottom: 1px solid #f8fafc;
+  padding-bottom: 0.25rem;
+}
+.markdown-body h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  color: #222222;
+}
+.markdown-body p {
+  margin-bottom: 1rem;
+  color: #334155;
+}
+.markdown-body ul {
+  list-style-type: disc;
+  padding-left: 1.25rem;
+  margin-bottom: 1rem;
+}
+.markdown-body ol {
+  list-style-type: decimal;
+  padding-left: 1.25rem;
+  margin-bottom: 1rem;
+}
+.markdown-body li {
+  margin-bottom: 0.35rem;
+  color: #334155;
+}
+.markdown-body code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background-color: #f3f4f6;
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.15rem;
+  color: #000000;
+}
+.markdown-body pre {
+  background-color: #f9fafb;
+  color: #111827;
+  padding: 1.25rem;
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  margin-bottom: 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  border: 1px solid #e5e7eb;
+}
+.markdown-body pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+}
+.markdown-body blockquote {
+  border-left: 3px solid #000000;
+  padding-left: 1.25rem;
+  margin-left: 0;
+  margin-right: 0;
+  font-style: italic;
+  color: #4b5563;
+  margin-bottom: 1rem;
+}
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.25rem;
+  font-size: 0.875rem;
+}
+.markdown-body th, .markdown-body td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.markdown-body th {
+  background-color: #f9fafb;
+  font-weight: 500;
+  color: #111827;
+}
+.markdown-body tr:nth-child(even) {
+  background-color: #f9fafb;
+}
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid #e5e7eb;
+  margin: 1.75rem 0;
+}
+.markdown-body a {
+  color: #000000;
+  text-decoration: underline;
+}
+.markdown-body a:hover {
+  color: #4b5563;
+}
+
+/* Custom Markdown Editor Prism Overrides */
+.token.title {
+  color: #000000;
+  font-weight: 700;
+}
+.token.title .token.punctuation {
+  color: #94a3b8;
+  font-weight: normal;
+}
+.token.list {
+  color: #111111;
+  font-weight: bold;
+}
+.token.bold {
+  font-weight: 700;
+  color: #000000;
+}
+.token.italic {
+  font-style: italic;
+  color: #334155;
+}
+.token.code {
+  color: #111827;
+  background-color: #f3f4f6;
+  padding: 0.1rem 0.2rem;
+  border-radius: 0.15rem;
+}
+.token.blockquote {
+  color: #4b5563;
+}
+.token.url {
+  color: #000000;
+  text-decoration: underline;
+}
+.token.punctuation {
+  color: #94a3b8;
+}
+.token.comment {
+  color: #94a3b8;
+  font-style: italic;
+}
+.token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol {
+  color: #2563eb;
+}
+.token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted {
+  color: #059669;
+}
+.token.keyword {
+  color: #4f46e5;
+  font-weight: 600;
+}
+.token.function {
+  color: #7c3aed;
+}
+.token.class-name, .token.type {
+  color: #0f766e;
+  font-weight: 500;
+}
+.token.operator, .token.entity {
+  color: #4b5563;
+}
+.token.variable {
+  color: #b45309;
+}
+
+
+

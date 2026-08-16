@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  okf-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: okf-knowledge-studio:latest
+    container_name: okf-knowledge-studio
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - APP_URL=${APP_URL:-http://localhost:3000}
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    resources:
+      limits:
+        memory: 1024M

@@ -1,4 +1,7 @@
-# From Raw Documents to Living Knowledge
+/**
+ * Embedded README.md documentation string for the in-app About modal viewer.
+ */
+export const README_MARKDOWN = `# From Raw Documents to Living Knowledge
 
 > A clear guide to unlocking your organization's documents, converting them into structured text, and building trusted, interconnected knowledge with the **Open Knowledge Format (OKF)**.
 
@@ -20,7 +23,7 @@ This guide explains the two-step transformation that solves this:
 
 ## 📖 The Two-Step Transformation Journey
 
-```
+\`\`\`
 ┌─────────────────────────┐
 │   Traditional Files     │  PDFs, Word documents, presentations, scans
 │ (Trapped in Containers) │  - Rigid layout, difficult to search accurately
@@ -41,7 +44,7 @@ This guide explains the two-step transformation that solves this:
 │     (OKF Knowledge      │  - Bidirectional links & relationship maps
 │        Network)         │  - 5 Built-in Trust & Verification Signals
 └─────────────────────────┘
-```
+\`\`\`
 
 ---
 
@@ -77,7 +80,7 @@ The **Open Knowledge Format (OKF)** transforms a long, continuous document into 
 
 Each concept focuses on a single clear topic (e.g., *a policy rule, an operational procedure, a product specification, or a definition*).
 
-```
+\`\`\`
    [ Traditional Monolithic Document ]
    ┌─────────────────────────────────┐
    │ 300-Page Employee Handbook      │
@@ -104,7 +107,7 @@ Each concept focuses on a single clear topic (e.g., *a policy rule, an operation
          │ Concept: Expense    ├──────────┘
          │ Claims & Limits     │
          └─────────────────────┘
-```
+\`\`\`
 
 ---
 
@@ -141,7 +144,7 @@ To ensure that AI assistants and team members never act on unverified, out-of-da
 
 Imagine asking: *"What is the approved procedure for requesting international project equipment?"*
 
-```
+\`\`\`
 Traditional Keyword Search
   Search: "international equipment"
   Result: 47 PDFs found matching the words.
@@ -161,7 +164,7 @@ OKF-Powered Knowledge System
     ✔ Confirms "Human-Reviewed" by Procurement Director
     ✔ Shows it was sourced from "2026 Procurement Manual, Page 14"
     ✔ Automatically displays prerequisite steps (e.g., Budget Approval)
-```
+\`\`\`
 
 ---
 
@@ -200,3 +203,4 @@ OKF-Powered Knowledge System
 Transforming static documents into the **Open Knowledge Format (OKF)** represents a shift from **passive file storage** to **active, reliable intelligence**.
 
 By pairing clean, universal text with explicit trust signals and relationship mapping, your organization ensures that its collective wisdom remains accurate, discoverable, and ready for both human teams and modern AI collaboration.
+`;
