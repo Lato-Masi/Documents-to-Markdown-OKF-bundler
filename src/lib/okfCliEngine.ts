@@ -487,24 +487,27 @@ jobs:
 
       const skillPkg = sliceMonolithToAgentSkill(fileContent, { customSkillName: targetFile.replace(/\.[^/.]+$/, '') });
       const validation = validateAgentSkill(skillPkg);
+      const errors = validation.issues.filter(i => i.severity === 'error');
+      const warnings = validation.issues.filter(i => i.severity === 'warning');
+      const score = Math.max(0, 100 - (errors.length * 20 + warnings.length * 5));
 
-      stdout.push(`Validation Score: \x1b[1m${validation.score}/100\x1b[0m (${validation.valid ? 'VALID' : 'INVALID'})`);
+      stdout.push(`Validation Score: \x1b[1m${score}/100\x1b[0m (${validation.valid ? 'VALID' : 'INVALID'})`);
       stdout.push(``);
 
-      for (const rule of validation.rules) {
-        const icon = rule.passed ? '\x1b[32m✔\x1b[0m' : '\x1b[31m✖\x1b[0m';
-        stdout.push(`  ${icon} \x1b[1m${rule.id}\x1b[0m (${rule.name}): ${rule.passed ? 'PASSED' : 'FAILED'}`);
-        if (!rule.passed && rule.message) {
-          stdout.push(`    \x1b[90m${rule.message}\x1b[0m`);
+      for (const issue of validation.issues) {
+        const icon = issue.severity === 'error' ? '\x1b[31m✖\x1b[0m' : '\x1b[33m⚠\x1b[0m';
+        stdout.push(`  ${icon} \x1b[1m${issue.ruleId}\x1b[0m: ${issue.message}`);
+        if (issue.suggestion) {
+          stdout.push(`    \x1b[90m${issue.suggestion}\x1b[0m`);
         }
       }
 
       if (!validation.valid) {
         exitCode = 1;
-        stderr.push(`\x1b[1;31m[FAILED]\x1b[0m Preflight validation failed with ${validation.errors.length} error(s).`);
+        stderr.push(`\x1b[1;31m[FAILED]\x1b[0m Preflight validation failed with ${errors.length} error(s).`);
       } else {
         stdout.push(``);
-        stdout.push(`\x1b[1;32m[PASS]\x1b[0m All 6 preflight validator rules passed.`);
+        stdout.push(`\x1b[1;32m[PASS]\x1b[0m All preflight validator rules passed.`);
       }
       break;
     }

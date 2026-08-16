@@ -1,4 +1,16 @@
-import { LiteParse } from "@llamaindex/liteparse";
+let cachedLiteParse: any = null;
+
+async function getLiteParseClass(): Promise<any> {
+  if (cachedLiteParse) return cachedLiteParse;
+  try {
+    const mod: any = await import("@llamaindex/liteparse");
+    cachedLiteParse = mod.LiteParse || (mod.default && mod.default.LiteParse) || mod.default;
+    return cachedLiteParse;
+  } catch (err) {
+    console.warn("[LiteParse] Dynamic import error:", err);
+    return null;
+  }
+}
 
 export interface SpatialWord {
   text: string;
@@ -109,6 +121,11 @@ export async function parsePdfWithLiteParse(
   const startTime = Date.now();
 
   try {
+    const LiteParse = await getLiteParseClass();
+    if (!LiteParse) {
+      throw new Error("LiteParse engine could not be initialized");
+    }
+
     // 1. Run JSON extraction with full spatial bounding boxes
     const lpJson = new LiteParse({
       outputFormat: "json",
