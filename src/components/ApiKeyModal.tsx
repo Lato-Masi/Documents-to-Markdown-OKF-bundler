@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Key, X, ExternalLink, ShieldCheck, AlertTriangle, Check, Trash2, Eye, EyeOff, Lock, UserPlus, Info } from "lucide-react";
 import { getCustomApiKey, saveCustomApiKey, removeCustomApiKey, maskApiKey } from "../utils/apiKeyStorage";
+import PayPalButton from "./PayPalButton";
 
 interface ApiKeyModalProps {
   isOpen: boolean;
@@ -328,6 +329,23 @@ export default function ApiKeyModal({ isOpen, onClose, onKeyChange }: ApiKeyModa
             <p className="text-[11px] text-zinc-500 leading-relaxed">
               Google AI Studio provides free-tier API keys with generous rate limits suitable for multimodal document conversion and OCR.
             </p>
+          </div>
+
+          {/* Direct Pay for Usage Option via PayPal */}
+          <div className="pt-3 border-t border-zinc-800 space-y-3">
+            <h4 className="text-[11px] uppercase tracking-wider text-zinc-400 font-semibold flex items-center justify-between">
+              <span>Alternative: Pay for Usage</span>
+              <span className="text-[10px] text-amber-400 font-normal">Instant Access</span>
+            </h4>
+            <div className="p-4 rounded-xl bg-zinc-950/90 border border-zinc-800/90 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="text-xs text-zinc-300 space-y-1 text-center sm:text-left">
+                <p className="font-semibold text-zinc-200">No Gemini API key? Pay directly</p>
+                <p className="text-zinc-400 text-[11px]">
+                  Purchase processing credits securely via PayPal without configuring custom API credentials.
+                </p>
+              </div>
+              <PayPalButton />
+            </div>
           </div>
         </div>
 

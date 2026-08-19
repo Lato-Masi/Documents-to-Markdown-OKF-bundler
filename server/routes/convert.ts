@@ -15,6 +15,13 @@ import { convertWithAnydoc } from "../utils/anydocEngine";
 import { parsePageChunks, createSlidingWindows } from "../utils/slidingWindow";
 import { parsePdfWithLiteParse } from "../utils/liteparseEngine";
 import { extractCleanArticleHtml } from "../utils/readabilityExtractor";
+import { fetchRenderedPage } from "../utils/playwrightFetcher";
+import { discoverDomainArchitecture, parseRobotsTxt, parseLlmsTxt, parseSitemaps } from "../utils/siteDiscoveryEngine";
+import { executeSemanticCrawl } from "../utils/semanticCrawler";
+import { executeStrictJsonExtraction, EXTRACTION_PRESETS } from "../utils/schemaExtractor";
+import { executeSiteMapExtraction } from "../utils/siteMapper";
+import { executeBatchUrlScrape } from "../utils/batchScraper";
+import { executeSearchAndScrape } from "../utils/searchScraper";
 
 const router = Router();
 
@@ -710,90 +717,104 @@ router.post("/fetch-url", async (req, res) => {
     return res.status(400).json({ error: `URL security validation failed: ${urlCheck.reason}` });
   }
 
+  // Set streaming response headers early so user receives immediate live status updates
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+
   try {
-    const fetchRes = await fetch(urlCheck.parsedUrl.toString(), {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
-      },
-    });
-
-    if (!fetchRes.ok) {
-      throw new Error(`Failed to fetch URL. HTTP status ${fetchRes.status}`);
-    }
-
-    const contentType = fetchRes.headers.get("content-type") || "";
-    const arrayBuffer = await fetchRes.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const base64Data = buffer.toString("base64");
-
     const urlObj = new URL(url);
-    const pathname = urlObj.pathname;
-    let fileName = pathname.split("/").pop() || "web_document";
-    if (!fileName.includes(".")) {
-      if (contentType.includes("pdf")) fileName += ".pdf";
-      else if (contentType.includes("html")) fileName += ".html";
-      else if (contentType.includes("json")) fileName += ".json";
-      else fileName += ".txt";
+    const pathname = urlObj.pathname.toLowerCase();
+
+    // 1. Check obvious binary/document file extension from URL pathname
+    const NON_HTML_EXTENSIONS: Record<string, string> = {
+      ".pdf": "application/pdf",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".doc": "application/msword",
+      ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      ".ppt": "application/vnd.ms-powerpoint",
+      ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".xls": "application/vnd.ms-excel",
+      ".csv": "text/csv",
+      ".json": "application/json",
+      ".xml": "application/xml",
+      ".txt": "text/plain",
+      ".md": "text/markdown",
+      ".rtf": "application/rtf",
+      ".epub": "application/epub+zip",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+      ".svg": "image/svg+xml",
+    };
+
+    let matchedExt = Object.keys(NON_HTML_EXTENSIONS).find((ext) => pathname.endsWith(ext));
+    let detectedContentType: string | null = matchedExt ? NON_HTML_EXTENSIONS[matchedExt] : null;
+
+    // 2. If no explicit non-HTML extension, do a fast lightweight HEAD pre-flight request to inspect Content-Type
+    if (!detectedContentType) {
+      try {
+        const headRes = await fetch(urlCheck.parsedUrl.toString(), {
+          method: "HEAD",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
+          },
+          signal: AbortSignal.timeout(4000),
+        });
+
+        if (headRes.ok) {
+          const rawCt = (headRes.headers.get("content-type") || "").toLowerCase().split(";")[0].trim();
+          if (
+            rawCt &&
+            !rawCt.includes("text/html") &&
+            !rawCt.includes("application/xhtml") &&
+            rawCt !== "*/*" &&
+            rawCt !== "text/plain"
+          ) {
+            detectedContentType = rawCt;
+          }
+        }
+      } catch {
+        // HEAD preflight failed or timed out; will proceed to route decision
+      }
     }
 
-    let fileType = contentType.split(";")[0].trim().toLowerCase();
-    if (!fileType || fileType === "*/*") {
-      if (fileName.endsWith(".pdf")) fileType = "application/pdf";
-      else if (fileName.endsWith(".html") || fileName.endsWith(".htm")) fileType = "text/html";
-      else fileType = "text/plain";
-    }
+    // 3. CHANNEL A: Direct Binary/Document Processing Channel (Non-HTML content: PDF, DOCX, XLSX, etc.)
+    if (detectedContentType && !detectedContentType.includes("html")) {
+      const fileName = url.split("/").pop()?.split("?")[0] || `document${matchedExt || ""}`;
+      res.write(`> 📦 **Fast Direct Asset Channel**: Detected binary/document stream (${detectedContentType}). Bypassing headless browser...\n\n`);
 
-    // Set streaming headers for client reader
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.write(`> 🌐 **URL Stream Ingestion**: Successfully fetched ${url} (${(buffer.length / 1024).toFixed(1)} KB, Content-Type: ${fileType})\n\n`);
-
-    // 1. Process HTML with Readability content-pruning filter
-    if (fileType.includes("html") || fileName.endsWith(".html") || fileName.endsWith(".htm")) {
-      const rawHtml = buffer.toString("utf-8");
-      const isTextOnly = conversionMode === "text-only";
-      const readability = extractCleanArticleHtml(rawHtml, {
-        stripImages: isTextOnly,
-        docTitle: fileName.replace(/\.[^/.]+$/, "").replace(/[-_]+/g, " "),
+      const binaryRes = await fetch(urlCheck.parsedUrl.toString(), {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          "Accept": "*/*",
+        },
+        signal: AbortSignal.timeout(20000),
       });
 
-      res.write(`> 📰 **Readability Content-Pruning Filter**: Eliminated ${readability.prunedElementCount} clutter elements (${readability.adBlocksRemoved} ads/banners, headers, navbars, cookies, popups). Isolated ${readability.isArticleDetected ? "primary article container" : "clean article text"} (${readability.textWordCount} words).\n\n`);
-
-      let mdBody = "";
-      try {
-        const pandocRes = await convertHtmlToMarkdownPandoc(readability.cleanedHtml);
-        if (pandocRes.markdown && pandocRes.markdown.trim().length > 0) {
-          mdBody = pandocRes.markdown.trim();
-        }
-      } catch (pErr) {
-        console.warn("Turndown conversion notice for URL:", pErr);
+      if (!binaryRes.ok) {
+        throw new Error(`Failed to download binary file. HTTP status ${binaryRes.status}`);
       }
 
-      // If Turndown yielded markdown, write out clean structured document with metadata header
-      if (mdBody) {
-        res.write(`> ⚡ **Fast Deterministic Article Extraction**: Processed via Readability GFM Engine\n\n`);
-        
-        let headerBlock = "";
-        if (readability.title && !mdBody.startsWith("# ")) {
-          headerBlock += `# ${readability.title}\n\n`;
-        }
-        if (readability.byline || readability.publishedTime || url) {
-          const metaParts: string[] = [];
-          if (readability.byline) metaParts.push(`**Author:** ${readability.byline}`);
-          if (readability.publishedTime) metaParts.push(`**Date:** ${readability.publishedTime}`);
-          if (readability.siteName) metaParts.push(`**Source:** ${readability.siteName}`);
-          metaParts.push(`[Original URL](${url})`);
-          headerBlock += `*${metaParts.join(" • ")}*\n\n---\n\n`;
-        }
+      const arrayBuffer = await binaryRes.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const base64Data = buffer.toString("base64");
 
-        res.write(headerBlock + mdBody);
+      res.write(`> 📄 **Downloaded**: ${(buffer.length / 1024).toFixed(1)} KB. Processing through document conversion engine...\n\n`);
+
+      // Try local deterministic converter (liteparse / pdf-parse / mammoth / xlsx)
+      const localConverted = await convertDocumentLocally(fileName, detectedContentType, base64Data);
+      if (localConverted && localConverted.trim().length > 0) {
+        res.write(localConverted);
         return res.end();
       }
 
-      // Fallback to Gemini if Turndown yielded empty content
+      // Gemini Vision/Document synthesis fallback if local parse is insufficient
       const apiKey = getGeminiApiKey(headerKey);
       if (apiKey) {
-        res.write(`> ⚠️ **Pipeline Fallback Switch**: Running Gemini 3.6 Flash layout synthesis on pruned HTML...\n\n`);
+        res.write(`> 🧠 **AI Document Vision Engine**: Processing document through Gemini 3.6 Flash...\n\n`);
         const ai = new GoogleGenAI({ apiKey });
         const responseStream = await generateContentStreamWithRetry(
           ai,
@@ -801,28 +822,115 @@ router.post("/fetch-url", async (req, res) => {
             model: "gemini-3.6-flash",
             contents: [
               {
-                text: `Extract this cleaned article HTML into well-structured Markdown. Omit any remaining navigation or ads.\n\nURL: ${url}\n\n${readability.cleanedHtml}`,
+                text: `Convert this document into pristine, well-structured Markdown. Preserve tables, headers, lists, and data formatting. Source: ${url}`,
+              },
+              {
+                inlineData: {
+                  mimeType: detectedContentType === "application/pdf" ? "application/pdf" : "text/plain",
+                  data: base64Data,
+                },
               },
             ],
           },
           3
         );
+
         for await (const chunk of responseStream) {
           res.write(chunk.text || "");
         }
         return res.end();
       }
-    }
 
-    // 2. Process non-HTML or binary document formats from URL
-    const localConverted = await convertDocumentLocally(fileName, fileType, base64Data);
-    if (localConverted && localConverted.trim().length > 0) {
-      res.write(localConverted);
+      // Plaintext fallback
+      res.write(`\n\n# ${fileName}\n\n*Fetched from: [${url}](${url})*\n\n`);
+      res.write(buffer.toString("utf-8"));
       return res.end();
     }
 
-    res.write(`\n\n# ${fileName}\n\n*Fetched from: [${url}](${url})*\n\n`);
-    res.write(buffer.toString("utf-8"));
+    // 4. CHANNEL B: Dynamic Web Headless Browser Channel (HTML web pages & Single Page Apps)
+    res.write(`> 🌐 **Dynamic Web Page Channel**: Launching server headless browser for ${url}...\n\n`);
+
+    const pageResult = await fetchRenderedPage(url, { timeoutMs: 15000 });
+    const engineLabel =
+      pageResult.renderedVia === "playwright"
+        ? "Playwright Headless Chromium (Dynamic JS Execution)"
+        : "High-Fidelity HTTP Stream";
+    res.write(`> 🎭 **Dynamic DOM Rendered**: ${engineLabel} in ${pageResult.loadTimeMs}ms (HTTP ${pageResult.status})\n\n`);
+
+    const rawHtml = pageResult.html;
+    const isTextOnly = conversionMode === "text-only";
+    const docTitle = pageResult.title || url.split("/").pop() || "Web Document";
+
+    // Run Mozilla Readability Reader Mode Engine
+    const readability = extractCleanArticleHtml(rawHtml, {
+      sourceUrl: pageResult.finalUrl || url,
+      stripImages: isTextOnly,
+      docTitle: docTitle.replace(/\.[^/.]+$/, "").replace(/[-_]+/g, " "),
+    });
+
+    res.write(
+      `> 📰 **Browser Reader Mode Pipeline**: Eliminated ${readability.prunedElementCount} clutter elements (${readability.adBlocksRemoved} ads/banners, headers, navbars, cookies, popups). Isolated ${
+        readability.isArticleDetected ? "primary article body" : "clean article text"
+      } (${readability.textWordCount} words, ~${readability.readingTimeMinutes} min read).\n\n`
+    );
+
+    const mdBody = readability.markdown?.trim() || "";
+
+    // If Reader Mode engine yielded structured Markdown, write out clean structured document with metadata header
+    if (mdBody) {
+      res.write(`> ⚡ **Reader Mode Extraction Complete**: Processed via Mozilla Readability & GFM Engine\n\n`);
+
+      let headerBlock = "";
+      if (readability.title && !mdBody.startsWith("# ")) {
+        headerBlock += `# ${readability.title}\n\n`;
+      }
+
+      const metaParts: string[] = [];
+      if (readability.byline) metaParts.push(`**Author:** ${readability.byline}`);
+      if (readability.publishedTime) metaParts.push(`**Date:** ${readability.publishedTime}`);
+      if (readability.siteName) metaParts.push(`**Source:** ${readability.siteName}`);
+      if (readability.readingTimeMinutes) metaParts.push(`**Read time:** ~${readability.readingTimeMinutes} min`);
+      metaParts.push(`[Original Article](${url})`);
+
+      if (metaParts.length > 0) {
+        headerBlock += `*${metaParts.join(" • ")}*\n\n`;
+      }
+
+      if (readability.excerpt && !mdBody.includes(readability.excerpt)) {
+        headerBlock += `> *${readability.excerpt}*\n\n`;
+      }
+
+      headerBlock += `---\n\n`;
+
+      res.write(headerBlock + mdBody);
+      return res.end();
+    }
+
+    // Fallback to Gemini if deterministic reader yielded empty content
+    const apiKey = getGeminiApiKey(headerKey);
+    if (apiKey) {
+      res.write(`> ⚠️ **Pipeline Fallback Switch**: Running Gemini 3.6 Flash layout synthesis on pruned HTML...\n\n`);
+      const ai = new GoogleGenAI({ apiKey });
+      const responseStream = await generateContentStreamWithRetry(
+        ai,
+        {
+          model: "gemini-3.6-flash",
+          contents: [
+            {
+              text: `Extract this cleaned article HTML into well-structured Markdown. Omit any remaining navigation or ads.\n\nURL: ${url}\n\n${readability.cleanedHtml}`,
+            },
+          ],
+        },
+        3
+      );
+      for await (const chunk of responseStream) {
+        res.write(chunk.text || "");
+      }
+      return res.end();
+    }
+
+    res.write(`\n\n# ${docTitle}\n\n*Fetched from: [${url}](${url})*\n\n`);
+    res.write(rawHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
     return res.end();
   } catch (err: any) {
     console.error("URL Fetch error:", err);
@@ -832,6 +940,220 @@ router.post("/fetch-url", async (req, res) => {
       res.write(`\n\n> ❌ **URL Fetch Error**: ${err?.message || "Failed to download content."}\n`);
       return res.end();
     }
+  }
+});
+
+// Endpoint: POST /api/site-discover
+// Performs Phase 1 Site Discovery: analyzes robots.txt, llms.txt, and sitemaps
+router.post("/site-discover", async (req, res) => {
+  const { url } = req.body;
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ error: "Please provide a valid domain URL" });
+  }
+
+  const urlCheck = isSafeUrlForFetching(url);
+  if (!urlCheck.safe || !urlCheck.parsedUrl) {
+    return res.status(400).json({ error: `URL security validation failed: ${urlCheck.reason}` });
+  }
+
+  try {
+    const report = await discoverDomainArchitecture(url);
+    return res.json({ success: true, report });
+  } catch (err: any) {
+    console.error("Site discovery error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to perform site discovery inspection",
+    });
+  }
+});
+
+// Endpoint: POST /api/crawl
+// Phase 2: AI-Guided Semantic Recursive Crawler for OKF Knowledge Bases
+router.post("/crawl", async (req, res) => {
+  const { seedUrl, maxDepth, maxPages, pathPrefixLock, semanticFocusPrompt, customApiKey } = req.body;
+
+  if (!seedUrl || typeof seedUrl !== "string") {
+    return res.status(400).json({ error: "Please provide a valid seed URL" });
+  }
+
+  const urlCheck = isSafeUrlForFetching(seedUrl);
+  if (!urlCheck.safe || !urlCheck.parsedUrl) {
+    return res.status(400).json({ error: `Seed URL security validation failed: ${urlCheck.reason}` });
+  }
+
+  const headerKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
+  const apiKey = getGeminiApiKey(headerKey);
+
+  // Set SSE streaming headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const sendSSE = (event: string, data: any) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    sendSSE("status", { message: `Initializing semantic crawler for seed: ${seedUrl}...` });
+
+    const kbResult = await executeSemanticCrawl({
+      seedUrl,
+      maxDepth: typeof maxDepth === "number" ? Math.min(Math.max(1, maxDepth), 4) : 2,
+      maxPages: typeof maxPages === "number" ? Math.min(Math.max(1, maxPages), 30) : 12,
+      pathPrefixLock: pathPrefixLock !== false,
+      semanticFocusPrompt: semanticFocusPrompt || undefined,
+      apiKey: apiKey || process.env.GEMINI_API_KEY || "",
+      onProgress: (progressEvent) => {
+        sendSSE("progress", progressEvent);
+      },
+    });
+
+    sendSSE("result", { success: true, kbResult });
+    return res.end();
+  } catch (err: any) {
+    console.error("Semantic Crawl Error:", err);
+    sendSSE("crawl_error", { error: err?.message || "Failed to complete recursive semantic crawl." });
+    return res.end();
+  }
+});
+
+// Endpoint: GET /api/extract/presets
+// Returns available JSON Schema extraction templates
+router.get("/extract/presets", (req, res) => {
+  res.json({ success: true, presets: EXTRACTION_PRESETS });
+});
+
+// Endpoint: POST /api/extract
+// Phase 3: Strict JSON Schema Structured Extraction
+router.post("/extract", async (req, res) => {
+  const { content, url, jsonSchema, extractionPrompt, presetId, customApiKey } = req.body;
+
+  if (!content && !url) {
+    return res.status(400).json({ error: "Please provide either 'content' (markdown/text) or a 'url' to extract from." });
+  }
+
+  if (url) {
+    const urlCheck = isSafeUrlForFetching(url);
+    if (!urlCheck.safe) {
+      return res.status(400).json({ error: `URL security validation failed: ${urlCheck.reason}` });
+    }
+  }
+
+  const headerKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
+  const apiKey = getGeminiApiKey(headerKey);
+
+  try {
+    const result = await executeStrictJsonExtraction({
+      content,
+      url,
+      jsonSchema,
+      extractionPrompt,
+      presetId,
+      apiKey: apiKey || process.env.GEMINI_API_KEY || "",
+    });
+
+    return res.json({ success: true, result });
+  } catch (err: any) {
+    console.error("Schema Extraction Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to perform structured schema extraction.",
+    });
+  }
+});
+
+// Endpoint: POST /api/map
+// Phase 3: Sitemap URL Extraction & Hierarchy Mapping
+router.post("/map", async (req, res) => {
+  const { domainOrSitemapUrl, maxUrls, filterPrefix, filterExtension, searchKeyword } = req.body;
+
+  if (!domainOrSitemapUrl || typeof domainOrSitemapUrl !== "string") {
+    return res.status(400).json({ error: "Please provide a valid domain or sitemap.xml URL" });
+  }
+
+  const urlCheck = isSafeUrlForFetching(domainOrSitemapUrl);
+  if (!urlCheck.safe) {
+    return res.status(400).json({ error: `Domain/Sitemap URL security validation failed: ${urlCheck.reason}` });
+  }
+
+  try {
+    const mapResult = await executeSiteMapExtraction({
+      domainOrSitemapUrl,
+      maxUrls: typeof maxUrls === "number" ? Math.min(Math.max(10, maxUrls), 2000) : 500,
+      filterPrefix,
+      filterExtension,
+      searchKeyword,
+    });
+
+    return res.json({ success: true, mapResult });
+  } catch (err: any) {
+    console.error("Sitemap Extraction Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to extract sitemap and URL hierarchy.",
+    });
+  }
+});
+
+// Endpoint: POST /api/batch-scrape
+// Phase 4: High-Performance Multi-URL Batch Scraping & Corpus Compilation
+router.post("/batch-scrape", async (req, res) => {
+  const { urls, concurrency, docStyle, cleanClutter } = req.body;
+
+  if (!Array.isArray(urls) || urls.length === 0) {
+    return res.status(400).json({ error: "Please provide an array of URLs to scrape in batch." });
+  }
+
+  // Cap batch limit at 50 URLs per request to ensure server stability
+  const targetUrls = urls.slice(0, 50);
+
+  try {
+    const result = await executeBatchUrlScrape({
+      urls: targetUrls,
+      concurrency: typeof concurrency === "number" ? Math.min(Math.max(1, concurrency), 8) : 3,
+      docStyle: docStyle || "standard",
+      cleanClutter: cleanClutter !== false,
+    });
+
+    return res.json({ success: true, result });
+  } catch (err: any) {
+    console.error("Batch Scrape Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to execute batch URL scraping.",
+    });
+  }
+});
+
+// Endpoint: POST /api/search-scrape
+// Phase 4: AI Search Grounding & Deep Scrape Synthesis
+router.post("/search-scrape", async (req, res) => {
+  const { query, domainFilter, maxSources, customApiKey } = req.body;
+
+  if (!query || typeof query !== "string" || !query.trim()) {
+    return res.status(400).json({ error: "Please provide a valid research search query." });
+  }
+
+  const headerKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
+  const apiKey = getGeminiApiKey(headerKey);
+
+  try {
+    const result = await executeSearchAndScrape({
+      query: query.trim(),
+      domainFilter: domainFilter?.trim() || undefined,
+      maxSources: typeof maxSources === "number" ? Math.min(Math.max(1, maxSources), 8) : 4,
+      apiKey: apiKey || process.env.GEMINI_API_KEY || "",
+    });
+
+    return res.json({ success: true, result });
+  } catch (err: any) {
+    console.error("Search & Scrape Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to execute search grounding & deep scrape synthesis.",
+    });
   }
 });
 

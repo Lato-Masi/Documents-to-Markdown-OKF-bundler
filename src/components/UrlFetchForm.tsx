@@ -1,5 +1,6 @@
-import React from "react";
-import { Globe, Link, Play, RefreshCw, Sparkles, ShieldCheck, FileText } from "lucide-react";
+import React, { useState } from "react";
+import { Globe, Link, Play, RefreshCw, Sparkles, ShieldCheck, FileText, Compass } from "lucide-react";
+import SiteDiscoveryModal from "./SiteDiscoveryModal";
 
 interface UrlFetchFormProps {
   inputUrl: string;
@@ -16,6 +17,8 @@ export default function UrlFetchForm({
   onFetchUrl,
   presetUrls,
 }: UrlFetchFormProps) {
+  const [isDiscoveryOpen, setIsDiscoveryOpen] = useState(false);
+
   return (
     <div className="bg-zinc-900/60 rounded-xl p-4 sm:p-5 border border-zinc-800">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -23,9 +26,19 @@ export default function UrlFetchForm({
           <Globe className="w-5 h-5 text-emerald-400 shrink-0" />
           <span>Convert Web Page or Online Document URL</span>
         </div>
-        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium">
-          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Readability Content-Pruning Active</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsDiscoveryOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium transition cursor-pointer"
+            title="Inspect domain standards: robots.txt, llms.txt, and sitemap.xml"
+          >
+            <Compass className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Discover Site (robots / llms.txt / sitemap)</span>
+          </button>
+          <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-zinc-800 text-[11px] text-zinc-400 font-medium border border-zinc-700/60">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Reader Mode Active</span>
+          </div>
         </div>
       </div>
       <p className="text-xs text-zinc-400 mb-4">
@@ -81,6 +94,16 @@ export default function UrlFetchForm({
           ))}
         </div>
       )}
+
+      {/* Site Discovery Modal */}
+      <SiteDiscoveryModal
+        isOpen={isDiscoveryOpen}
+        onClose={() => setIsDiscoveryOpen(false)}
+        initialUrl={inputUrl || "https://playwright.dev"}
+        onSelectUrl={(selected) => {
+          setInputUrl(selected);
+        }}
+      />
     </div>
   );
 }

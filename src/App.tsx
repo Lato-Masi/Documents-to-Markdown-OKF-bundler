@@ -9,10 +9,16 @@ import DiagnosticConsole, { DiagnosticLog, StreamMetrics } from "./components/Di
 import { HistoryItem, ConversionMode, TargetStyle, ViewMode, SourceType, TabType, SpatialDocumentResult } from "./types";
 import { getMimeTypeByExtension } from "./utils/fileHelpers";
 import { cleanMarkdownOutput } from "./utils/markdownCleaner";
-import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key } from "lucide-react";
+import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search } from "lucide-react";
 import MultiDocProcessingHub from "./components/MultiDocProcessingHub";
 import AboutModal from "./components/AboutModal";
 import ApiKeyModal from "./components/ApiKeyModal";
+import PayPalButton from "./components/PayPalButton";
+import SemanticCrawlModal from "./components/SemanticCrawlModal";
+import StrictJsonExtractorModal from "./components/StrictJsonExtractorModal";
+import SiteMapperModal from "./components/SiteMapperModal";
+import BatchUrlScraperModal from "./components/BatchUrlScraperModal";
+import SearchAndScrapeModal from "./components/SearchAndScrapeModal";
 import { getCustomApiKey } from "./utils/apiKeyStorage";
 
 export default function App() {
@@ -23,6 +29,12 @@ export default function App() {
   const [error, setError] = useState<string>("");
   const [isAboutOpen, setIsAboutOpen] = useState<boolean>(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [isCrawlModalOpen, setIsCrawlModalOpen] = useState<boolean>(false);
+  const [isJsonExtractorOpen, setIsJsonExtractorOpen] = useState<boolean>(false);
+  const [isSiteMapperOpen, setIsSiteMapperOpen] = useState<boolean>(false);
+  const [isBatchScraperOpen, setIsBatchScraperOpen] = useState<boolean>(false);
+  const [batchScrapeInitialUrls, setBatchScrapeInitialUrls] = useState<string[]>([]);
+  const [isSearchScraperOpen, setIsSearchScraperOpen] = useState<boolean>(false);
   const [customApiKey, setCustomApiKey] = useState<string>(() => getCustomApiKey());
 
   // Spatial Layout & Quality Threshold State
@@ -748,32 +760,87 @@ export default function App() {
                   <Globe className="w-3.5 h-3.5" />
                   <span>Convert from URL</span>
                 </button>
+                <button
+                  id="source-type-crawler-btn"
+                  type="button"
+                  onClick={() => setIsCrawlModalOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 shadow-sm"
+                  title="Recursively crawl domain documentation & generate master OKF Knowledge Base"
+                >
+                  <Brain className="w-3.5 h-3.5 text-purple-400" />
+                  <span>Semantic Crawler</span>
+                </button>
+                <button
+                  id="source-type-extract-btn"
+                  type="button"
+                  onClick={() => setIsJsonExtractorOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm"
+                  title="Extract strict structured JSON adhering to custom schema or preset templates (/extract)"
+                >
+                  <Braces className="w-3.5 h-3.5 text-amber-400" />
+                  <span>JSON Extract</span>
+                </button>
+                <button
+                  id="source-type-mapper-btn"
+                  type="button"
+                  onClick={() => setIsSiteMapperOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm"
+                  title="Map domain sitemaps & URL hierarchies for bulk selection (/map)"
+                >
+                  <Map className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Site Map</span>
+                </button>
+                <button
+                  id="source-type-batch-scraper-btn"
+                  type="button"
+                  onClick={() => setIsBatchScraperOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-sm"
+                  title="Scrape multiple URLs in parallel with concurrency pool and ZIP export (/batch-scrape)"
+                >
+                  <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Batch Scrape</span>
+                </button>
+                <button
+                  id="source-type-search-scraper-btn"
+                  type="button"
+                  onClick={() => setIsSearchScraperOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 border border-violet-500/30 shadow-sm"
+                  title="AI Search Grounding & Deep Article Scrape Synthesis (/search-scrape)"
+                >
+                  <Search className="w-3.5 h-3.5 text-violet-400" />
+                  <span>Search & Scrape</span>
+                </button>
               </div>
 
-              {/* Bring Your Own Key (BYOK) Button to the far right */}
-              <button
-                id="byok-open-modal-btn"
-                type="button"
-                onClick={() => setIsApiKeyModalOpen(true)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border cursor-pointer ${
-                  customApiKey
-                    ? "bg-amber-950/60 border-amber-800/80 text-amber-300 hover:bg-amber-900/60 hover:text-amber-200 shadow-sm"
-                    : "bg-zinc-900 hover:bg-zinc-800 border-zinc-700/80 text-zinc-300 hover:text-white"
-                }`}
-                title={
-                  customApiKey
-                    ? "Custom Gemini API Key active (Click to view, change, or remove)"
-                    : "Bring Your Own Google Gemini API Key"
-                }
-              >
-                <Key className={`w-3.5 h-3.5 ${customApiKey ? "text-amber-400" : "text-zinc-400"}`} />
-                <span>Bring Your Own Key</span>
-                {customApiKey ? (
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse ml-0.5" title="Key Active" />
-                ) : (
-                  <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline">(Optional)</span>
-                )}
-              </button>
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* Bring Your Own Key (BYOK) Button to the far right */}
+                <button
+                  id="byok-open-modal-btn"
+                  type="button"
+                  onClick={() => setIsApiKeyModalOpen(true)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border cursor-pointer ${
+                    customApiKey
+                      ? "bg-amber-950/60 border-amber-800/80 text-amber-300 hover:bg-amber-900/60 hover:text-amber-200 shadow-sm"
+                      : "bg-zinc-900 hover:bg-zinc-800 border-zinc-700/80 text-zinc-300 hover:text-white"
+                  }`}
+                  title={
+                    customApiKey
+                      ? "Custom Gemini API Key active (Click to view, change, or remove)"
+                      : "Bring Your Own Google Gemini API Key"
+                  }
+                >
+                  <Key className={`w-3.5 h-3.5 ${customApiKey ? "text-amber-400" : "text-zinc-400"}`} />
+                  <span>Bring Your Own Key</span>
+                  {customApiKey ? (
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse ml-0.5" title="Key Active" />
+                  ) : (
+                    <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline">(Optional)</span>
+                  )}
+                </button>
+
+                {/* PayPal Pay for usage button */}
+                <PayPalButton />
+              </div>
             </div>
 
             {sourceType === "url" && (
@@ -898,6 +965,109 @@ export default function App() {
         isOpen={isApiKeyModalOpen}
         onClose={() => setIsApiKeyModalOpen(false)}
         onKeyChange={(newKey) => setCustomApiKey(newKey)}
+      />
+
+      {/* Semantic Knowledge Base Crawler Modal (Phase 2 OKF) */}
+      <SemanticCrawlModal
+        isOpen={isCrawlModalOpen}
+        onClose={() => setIsCrawlModalOpen(false)}
+        initialSeedUrl={inputUrl || "https://playwright.dev/docs/intro"}
+        activeMarkdownContent={convertedMarkdown}
+        onKnowledgeBaseGenerated={(markdown, docName) => {
+          setConvertedMarkdown(markdown);
+          setActiveTab("preview");
+          const newItem: HistoryItem = {
+            id: Math.random().toString(36).substring(2, 9),
+            timestamp: new Date().toLocaleTimeString(),
+            fileName: docName,
+            fileSize: new Blob([markdown]).size,
+            wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
+            markdownContent: markdown,
+            sourceType: "manual",
+          };
+          const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+          setHistory(updated);
+          localStorage.setItem("doc_conv_history", JSON.stringify(updated));
+          addLog("success", "Semantic Crawl Knowledge Base Loaded", `Compiled OKF Knowledge Base loaded into workspace: ${docName}`);
+        }}
+      />
+
+      {/* Strict JSON Schema Extractor Modal (Phase 3) */}
+      <StrictJsonExtractorModal
+        isOpen={isJsonExtractorOpen}
+        onClose={() => setIsJsonExtractorOpen(false)}
+        activeMarkdownContent={convertedMarkdown}
+        activeUrl={inputUrl}
+        onApplyJsonToWorkspace={(jsonString) => {
+          setConvertedMarkdown(`\`\`\`json\n${jsonString}\n\`\`\``);
+          setActiveTab("preview");
+        }}
+      />
+
+      {/* Domain Sitemap & Hierarchy Mapper Modal (Phase 3) */}
+      <SiteMapperModal
+        isOpen={isSiteMapperOpen}
+        onClose={() => setIsSiteMapperOpen(false)}
+        initialDomainUrl={inputUrl || "https://playwright.dev"}
+        onSelectSingleUrl={(url) => {
+          setInputUrl(url);
+          setSourceType("url");
+        }}
+        onSelectUrlsForBatch={(urls) => {
+          setBatchScrapeInitialUrls(urls);
+          setIsBatchScraperOpen(true);
+        }}
+      />
+
+      {/* Batch Multi-URL Scraper Modal (Phase 4) */}
+      <BatchUrlScraperModal
+        isOpen={isBatchScraperOpen}
+        onClose={() => {
+          setIsBatchScraperOpen(false);
+          setBatchScrapeInitialUrls([]);
+        }}
+        initialUrls={batchScrapeInitialUrls.length > 0 ? batchScrapeInitialUrls : (inputUrl ? [inputUrl] : [])}
+        activeMarkdownContent={convertedMarkdown}
+        onLoadMergedCorpus={(markdown, docName) => {
+          setConvertedMarkdown(markdown);
+          setActiveTab("preview");
+          const newItem: HistoryItem = {
+            id: Math.random().toString(36).substring(2, 9),
+            timestamp: new Date().toLocaleTimeString(),
+            fileName: docName,
+            fileSize: new Blob([markdown]).size,
+            wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
+            markdownContent: markdown,
+            sourceType: "manual",
+          };
+          const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+          setHistory(updated);
+          localStorage.setItem("doc_conv_history", JSON.stringify(updated));
+          addLog("success", "Batch Scraped Corpus Loaded", `Batch scrape knowledge corpus loaded: ${docName}`);
+        }}
+      />
+
+      {/* AI Search Grounding & Deep Scrape Synthesis Modal (Phase 4) */}
+      <SearchAndScrapeModal
+        isOpen={isSearchScraperOpen}
+        onClose={() => setIsSearchScraperOpen(false)}
+        onLoadReportIntoStudio={(markdown, title) => {
+          setConvertedMarkdown(markdown);
+          setActiveTab("preview");
+          const newItem: HistoryItem = {
+            id: Math.random().toString(36).substring(2, 9),
+            timestamp: new Date().toLocaleTimeString(),
+            fileName: title,
+            fileSize: new Blob([markdown]).size,
+            wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
+            markdownContent: markdown,
+            sourceType: "manual",
+          };
+          const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+          setHistory(updated);
+          localStorage.setItem("doc_conv_history", JSON.stringify(updated));
+          addLog("success", "AI Search & Scrape Synthesis Loaded", `Grounded research report loaded: ${title}`);
+        }}
       />
     </div>
   );
