@@ -14,6 +14,7 @@ import convertRouter from "./server/routes/convert";
 import analysisRouter from "./server/routes/analysis";
 import mcpRouter from "./server/routes/mcp";
 import skillsRouter from "./server/routes/skills";
+import metaAstRouter from "./server/routes/metaAst";
 
 // Load environment variables from .env
 dotenv.config();
@@ -38,6 +39,8 @@ async function startServer() {
   app.use("/api", mcpRouter);
   // 4. Agent Skills procedural synthesis, validation & formal logic compiler
   app.use("/api", skillsRouter);
+  // 5. MetaAST Lexer, Parser & Vector DB Ingestion endpoints
+  app.use("/api", metaAstRouter);
 
   // Health check endpoint
   app.get("/api/health", (req, res) => {

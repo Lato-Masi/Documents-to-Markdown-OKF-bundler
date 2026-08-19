@@ -49,11 +49,25 @@ Run directly via `npx okf <command>`:
 | `npx okf export --format=<fmt>` | Exports graph to W3C Turtle RDF, JSON-LD, or Obsidian | `npx okf export --format=turtle` |
 | `npx okf query "<prompt>"` | Executes Graph-RAG neighborhood retrieval with 1-hop traversal | `npx okf query "Raft consensus election"` |
 
+### MetaAST & Vector DB Ingestion Commands
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| `npx okf ast <file> [--json]` | Parses Markdown with the zero-dependency state-machine lexer and prints MetaAST node hierarchy | `npx okf ast guide.md` |
+| `npx okf chunk <file> [options]` | Chunks Markdown into dual-layer vector DB payloads (Pinecone, Qdrant, pgvector, ChromaDB) | `npx okf chunk guide.md --max-tokens=512 --out-file=chunks.json` |
+
 ---
 
 ## 2. REST API Endpoints
 
 All endpoints are hosted on port `3000` under `/api/`:
+
+### MetaAST & Vector Ingestion API (`/api/meta-ast/*`)
+* `POST /api/meta-ast/parse`
+  * **Payload**: `{ markdown: string, documentTitle?: string }`
+  * **Response**: `{ success: true, totalNodes: number, estimatedTokens: number, typeDistribution: object, nodes: MetaASTNode[] }`
+* `POST /api/meta-ast/vector-prep`
+  * **Payload**: `{ markdown: string, options?: VectorChunkingOptions }`
+  * **Response**: `{ success: true, totalChunks: number, totalEstimatedTokens: number, chunks: VectorChunkPayload[] }`
 
 ### Procedural Skills API (`/api/skills/*`)
 * `POST /api/skills/synthesize`
@@ -75,9 +89,11 @@ All endpoints are hosted on port `3000` under `/api/`:
 The server implements the standard **MCP JSON-RPC 2.0 protocol** (`/api/mcp/rpc`) and capability manifest (`/api/mcp/manifest`), allowing direct integration with Claude Desktop, Cursor, and autonomous agents.
 
 ### Supported MCP Tools
-1. `synthesize_agent_skill`: Partitions unstructured SOPs into `SKILL.md`, `references/`, and `scripts/`.
-2. `classify_document_logic`: Computes First-Order Logic and Modal Deontic scores to determine procedural vs. declarative text.
-3. `validate_agent_skill_preflight`: Executes static analysis linting (SKILL-001 through SKILL-006).
-4. `search_okf_concepts`: Semantic and tag-filtered search across declarative OKF concepts.
-5. `traverse_okf_graph`: 1-hop and 2-hop topological dependency walking.
-6. `get_okf_concept`: Fetches raw concept markdown and YAML frontmatter.
+1. `parse_markdown_meta_ast`: Parses Markdown into hierarchical AST nodes with contextual breadcrumbs and token estimates.
+2. `chunk_markdown_for_vector_db`: Generates enriched vector DB chunks adhering to code/math atomicity and table header replication rules.
+3. `synthesize_agent_skill`: Partitions unstructured SOPs into `SKILL.md`, `references/`, and `scripts/`.
+4. `classify_document_logic`: Computes First-Order Logic and Modal Deontic scores to determine procedural vs. declarative text.
+5. `validate_agent_skill_preflight`: Executes static analysis linting (SKILL-001 through SKILL-006).
+6. `search_okf_concepts`: Semantic and tag-filtered search across declarative OKF concepts.
+7. `traverse_okf_graph`: 1-hop and 2-hop topological dependency walking.
+8. `get_okf_concept`: Fetches raw concept markdown and YAML frontmatter.

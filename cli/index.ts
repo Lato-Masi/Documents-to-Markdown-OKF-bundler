@@ -17,6 +17,11 @@ import path from 'path';
 import { sliceMonolithToAgentSkill } from '../src/lib/skillProceduralSlicer';
 import { validateAgentSkill } from '../src/lib/skillValidator';
 import { classifyTextLogic } from '../src/lib/logicClassifier';
+import {
+  parseMarkdownToAST,
+  enrichMetaAST,
+  chunkMarkdownForVectorDB,
+} from '../src/lib/metaAst';
 
 // Standalone CLI runner entrypoint
 const args = process.argv.slice(2);
@@ -27,7 +32,7 @@ const command = args[0] || 'help';
  */
 function printHelp() {
   console.log(`
-\x1b[1;34m@okf/cli\x1b[0m - Open Knowledge Format & Agent Skills CLI (v1.5.0)
+\x1b[1;34m@okf/cli\x1b[0m - Open Knowledge Format & Agent Skills CLI (v1.6.0)
 
 \x1b[1mUSAGE:\x1b[0m
   npx okf <command> [options]
@@ -40,6 +45,10 @@ function printHelp() {
   \x1b[32mquery\x1b[0m "<prompt>" [--hops=1]   Execute Graph-RAG retrieval and return grounded context
   \x1b[32mci-setup\x1b[0m                     Generate .github/workflows/okf-lint.yml workflow
 
+\x1b[1mMETAAST & VECTOR DB INGESTION:\x1b[0m
+  \x1b[32mast\x1b[0m <file> [--json]              Parse Markdown with zero-dependency lexer & display MetaAST
+  \x1b[32mchunk\x1b[0m <file> [options]            Generate dual-layer vector DB chunk payloads (Pinecone/Qdrant)
+
 \x1b[1mPROCEDURAL AGENT SKILLS (SKILL.MD):\x1b[0m
   \x1b[32mskill-split\x1b[0m <file> [--out-dir=dir]  Decompose SOP/runbook into Agent Skills package (SKILL.md)
   \x1b[32mskill-batch\x1b[0m <src-dir> [--out-dir=dir] Batch compile an entire directory of documents into skills
@@ -48,6 +57,9 @@ function printHelp() {
   \x1b[32mskill-init\x1b[0m <name> [dir]            Scaffold a compliant Agent Skill starter directory
 
 \x1b[1mOPTIONS:\x1b[0m
+  --max-tokens=<num>          Max token budget per chunk (default: 512)
+  --flush-tokens=<num>        Tokens before heading flush (default: 150)
+  --out-file=<path>           Write output to JSON file
   --strict                    Fail with non-zero exit code if preflight diagnostics find errors
   --out-dir=<dir>             Target directory for decomposed skills/concepts (default: .skills or .okf)
   --tools=<list>              Comma-separated list of allowed tools (e.g. run_command,edit_file)
@@ -267,6 +279,86 @@ This procedural skill orchestrates operations and recovery workflows for **${ski
       if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
     }
     console.log(`\x1b[32m✔\x1b[0m Scaffolded ${targetDir}/ structure.`);
+    process.exit(0);
+    break;
+  }
+
+  case 'ast': {
+    const filePath = args[1];
+    if (!filePath || !fs.existsSync(filePath)) {
+      console.error(`\x1b[31m✖\x1b[0m Markdown file not found: ${filePath || '<missing>'}`);
+      process.exit(1);
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const docTitle = path.basename(filePath, path.extname(filePath));
+    const rawNodes = parseMarkdownToAST(content);
+    const enriched = enrichMetaAST(rawNodes, { defaultDocumentTitle: docTitle });
+
+    const jsonMode = args.includes('--json');
+    const outFileArg = (args.find(a => a.startsWith('--out-file=')) || '').split('=')[1];
+
+    if (outFileArg) {
+      fs.writeFileSync(outFileArg, JSON.stringify(enriched, null, 2), 'utf-8');
+      console.log(`\x1b[32m✔\x1b[0m MetaAST written to \x1b[1m${outFileArg}\x1b[0m (${enriched.length} nodes)`);
+      process.exit(0);
+    }
+
+    if (jsonMode) {
+      console.log(JSON.stringify(enriched, null, 2));
+      process.exit(0);
+    }
+
+    console.log(`\x1b[1;34m[MetaAST Lexer & Parser]\x1b[0m Parsed \x1b[1m${filePath}\x1b[0m (${enriched.length} nodes):`);
+    enriched.forEach((node, idx) => {
+      const tokens = node.context.estimatedTokens || 0;
+      const preview =
+        node.type === 'heading'
+          ? `${'#'.repeat(node.depth || 1)} ${node.content}`
+          : node.type === 'code_block'
+          ? `\`\`\`${node.language || ''} (${node.rawText.split('\n').length} lines)`
+          : node.rawText.slice(0, 60).replace(/\n/g, ' ');
+      console.log(`  [${idx + 1}] \x1b[35m${node.type.padEnd(16)}\x1b[0m (~${tokens} tok) ➔ \x1b[2m${node.context.breadcrumbPath || 'Root'}\x1b[0m`);
+      console.log(`      \x1b[37m${preview}\x1b[0m`);
+    });
+    process.exit(0);
+    break;
+  }
+
+  case 'chunk': {
+    const filePath = args[1];
+    if (!filePath || !fs.existsSync(filePath)) {
+      console.error(`\x1b[31m✖\x1b[0m Markdown file not found: ${filePath || '<missing>'}`);
+      process.exit(1);
+    }
+    const maxTokensArg = (args.find(a => a.startsWith('--max-tokens=')) || '').split('=')[1];
+    const flushTokensArg = (args.find(a => a.startsWith('--flush-tokens=')) || '').split('=')[1];
+    const outFileArg = (args.find(a => a.startsWith('--out-file=')) || '').split('=')[1];
+
+    const maxTokens = maxTokensArg ? parseInt(maxTokensArg, 10) : 512;
+    const minHeadingFlushTokens = flushTokensArg ? parseInt(flushTokensArg, 10) : 150;
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const docTitle = path.basename(filePath, path.extname(filePath));
+
+    console.log(`\x1b[1;34m[MetaAST Vector Chunker]\x1b[0m Processing \x1b[1m${filePath}\x1b[0m (budget: ${maxTokens} tok/chunk)...`);
+    const chunks = chunkMarkdownForVectorDB(content, {
+      maxTokensPerChunk: maxTokens,
+      minHeadingFlushTokens,
+      defaultDocumentTitle: docTitle,
+    });
+
+    if (outFileArg) {
+      fs.writeFileSync(outFileArg, JSON.stringify(chunks, null, 2), 'utf-8');
+      console.log(`\x1b[32m✔\x1b[0m Generated ${chunks.length} vector chunks ➔ \x1b[1m${outFileArg}\x1b[0m`);
+      process.exit(0);
+    }
+
+    console.log(`\x1b[32m✔\x1b[0m Generated \x1b[1m${chunks.length}\x1b[0m vector chunks for \x1b[1m${docTitle}\x1b[0m:`);
+    chunks.forEach((chunk, i) => {
+      console.log(`  \x1b[36mChunk #${i + 1}\x1b[0m [${chunk.id}] (~${chunk.metadata.estimatedTokens} tok, type: ${chunk.metadata.chunkType})`);
+      console.log(`    \x1b[2mBreadcrumb:\x1b[0m ${chunk.metadata.breadcrumb}`);
+      console.log(`    \x1b[2mCode Blocks:\x1b[0m ${chunk.metadata.hasCodeBlock ? 'Yes' : 'No'} | \x1b[2mTables:\x1b[0m ${chunk.metadata.hasTable ? 'Yes' : 'No'} | \x1b[2mMath:\x1b[0m ${chunk.metadata.hasMath ? 'Yes' : 'No'}`);
+    });
     process.exit(0);
     break;
   }

@@ -185,6 +185,19 @@ OKF-Powered Knowledge System
 
 ---
 
+## ⚡ MetaAST Vector Database Ingestion & AST Explorer
+
+In addition to OKF knowledge graphing, the platform features a zero-dependency **MetaAST Parser and Vector DB Chunking Pipeline**:
+
+- 🌲 **State-Machine Lexer/AST Parser**: Parses YAML frontmatter, ATX headings, tables, LaTeX math, Mermaid diagrams, lists, and fenced code blocks without fragile regex.
+- 🏷️ **Contextual Enrichment Layer**: Decorates nodes with dynamic heading ancestry (`H1 > H2 > H3`), active governing sections, and document metadata.
+- 📦 **Dual-Layer Vector Payloads**: Generates enriched text for embedding models alongside clean Markdown for prompt injection, enforcing code/equation atomicity and table header replication.
+- 🔍 **Interactive Explorers**:
+  - **AST Explorer**: Inspect syntactic blocks, line coordinates, and contextual metadata.
+  - **Vector DB Prep**: Configure token budgets and export ready-to-upsert payloads for **Pinecone**, **Qdrant**, **pgvector**, and **ChromaDB**.
+
+---
+
 ## 🎯 Key Benefits at a Glance
 
 - 🔍 **Eliminate Wasted Search Time**: Stop opening dozens of documents to find one sentence; get the exact, self-contained concept instantly.

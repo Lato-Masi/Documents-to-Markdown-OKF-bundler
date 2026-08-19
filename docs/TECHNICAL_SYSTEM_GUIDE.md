@@ -18,6 +18,8 @@ It provides a unified development environment for:
 6. **Preflight Certification Engine**: Executing 6-stage compliance rules, generating cryptographic bundle digests (SHA-256), and producing verifiable JSON/PDF certificates.
 7. **Graph-Augmented Retrieval (Graph RAG)**: Subgraph traversal, topological path retrieval, cosine-similarity embedding search, and prompt synthesis for LLMs.
 8. **Multi-Format Export & MCP Server**: Serializing bundles to ZIP archives, JSON-LD, RDF Turtle, Neo4j Cypher scripts, W3C SPARQL triplestores, and Model Context Protocol (MCP) endpoints.
+9. **MetaAST Lexer & Vector DB Ingestion**: Zero-dependency deterministic lexing, contextual AST enrichment, table slicing with header preservation, and dual-layer vector DB chunk payloads (`Pinecone`, `Qdrant`, `pgvector`, `ChromaDB`).
+10. **Interactive AST & Chunk Explorers**: Visualizing node syntax trees, breadcrumb paths, and token distribution budgets.
 
 ---
 

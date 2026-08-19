@@ -2,14 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import "katex/dist/katex.min.css";
 import BatchZipProcessor from "./components/BatchZipProcessor";
 import SingleDocumentView from "./components/SingleDocumentView";
-import UrlFetchForm from "./components/UrlFetchForm";
 import ConversionHistory from "./components/ConversionHistory";
 import ErrorBoundary from "./components/ErrorBoundary";
 import DiagnosticConsole, { DiagnosticLog, StreamMetrics } from "./components/DiagnosticConsole";
 import { HistoryItem, ConversionMode, TargetStyle, ViewMode, SourceType, TabType, SpatialDocumentResult } from "./types";
 import { getMimeTypeByExtension } from "./utils/fileHelpers";
 import { cleanMarkdownOutput } from "./utils/markdownCleaner";
-import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search } from "lucide-react";
+import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search, Database, GitBranch, BookOpen } from "lucide-react";
 import MultiDocProcessingHub from "./components/MultiDocProcessingHub";
 import AboutModal from "./components/AboutModal";
 import ApiKeyModal from "./components/ApiKeyModal";
@@ -19,6 +18,10 @@ import StrictJsonExtractorModal from "./components/StrictJsonExtractorModal";
 import SiteMapperModal from "./components/SiteMapperModal";
 import BatchUrlScraperModal from "./components/BatchUrlScraperModal";
 import SearchAndScrapeModal from "./components/SearchAndScrapeModal";
+import VectorPrepModal from "./components/VectorPrepModal";
+import AstExplorerModal from "./components/AstExplorerModal";
+import ConvertUrlModal from "./components/ConvertUrlModal";
+import LexiconConfigModal from "./components/LexiconConfigModal";
 import { getCustomApiKey } from "./utils/apiKeyStorage";
 
 export default function App() {
@@ -29,12 +32,16 @@ export default function App() {
   const [error, setError] = useState<string>("");
   const [isAboutOpen, setIsAboutOpen] = useState<boolean>(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [isConvertUrlModalOpen, setIsConvertUrlModalOpen] = useState<boolean>(false);
   const [isCrawlModalOpen, setIsCrawlModalOpen] = useState<boolean>(false);
   const [isJsonExtractorOpen, setIsJsonExtractorOpen] = useState<boolean>(false);
   const [isSiteMapperOpen, setIsSiteMapperOpen] = useState<boolean>(false);
   const [isBatchScraperOpen, setIsBatchScraperOpen] = useState<boolean>(false);
   const [batchScrapeInitialUrls, setBatchScrapeInitialUrls] = useState<string[]>([]);
   const [isSearchScraperOpen, setIsSearchScraperOpen] = useState<boolean>(false);
+  const [isVectorPrepOpen, setIsVectorPrepOpen] = useState<boolean>(false);
+  const [isAstExplorerOpen, setIsAstExplorerOpen] = useState<boolean>(false);
+  const [isLexiconConfigOpen, setIsLexiconConfigOpen] = useState<boolean>(false);
   const [customApiKey, setCustomApiKey] = useState<string>(() => getCustomApiKey());
 
   // Spatial Layout & Quality Threshold State
@@ -654,7 +661,7 @@ export default function App() {
                   AI + OCR
                 </span>
               </h1>
-              <p className="text-[11px] sm:text-xs text-zinc-400">High-fidelity layout preservation & OKF v1.0 structuring</p>
+              <p className="text-[11px] sm:text-xs text-zinc-400">High-fidelity layout preservation & OKF structuring</p>
             </div>
           </div>
 
@@ -750,14 +757,11 @@ export default function App() {
                 <button
                   id="source-type-url-btn"
                   type="button"
-                  onClick={() => setSourceType("url")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
-                    sourceType === "url"
-                      ? "bg-zinc-800 text-emerald-400 border border-zinc-700 shadow-sm"
-                      : "text-zinc-400 hover:text-zinc-200"
-                  }`}
+                  onClick={() => setIsConvertUrlModalOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-sm"
+                  title="Convert any public webpage, online documentation, or PDF/DOCX URL to Markdown"
                 >
-                  <Globe className="w-3.5 h-3.5" />
+                  <Globe className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Convert from URL</span>
                 </button>
                 <button
@@ -810,6 +814,36 @@ export default function App() {
                   <Search className="w-3.5 h-3.5 text-violet-400" />
                   <span>Search & Scrape</span>
                 </button>
+                <button
+                  id="source-type-vector-prep-btn"
+                  type="button"
+                  onClick={() => setIsVectorPrepOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-sm"
+                  title="Prepare & chunk current Markdown for Vector Databases using MetaAST (Pinecone, Qdrant, pgvector)"
+                >
+                  <Database className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Vector DB Prep</span>
+                </button>
+                <button
+                  id="source-type-ast-explorer-btn"
+                  type="button"
+                  onClick={() => setIsAstExplorerOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 shadow-sm"
+                  title="Inspect hierarchical MetaAST, node types, and contextual metadata"
+                >
+                  <GitBranch className="w-3.5 h-3.5 text-purple-400" />
+                  <span>AST Explorer</span>
+                </button>
+                <button
+                  id="source-type-lexicon-btn"
+                  type="button"
+                  onClick={() => setIsLexiconConfigOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-sm"
+                  title="Configure domain entities, synonyms, and acronyms for NLP tagging and Graph-RAG"
+                >
+                  <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>NLP Lexicon</span>
+                </button>
               </div>
 
               <div className="flex items-center gap-3 flex-wrap">
@@ -842,21 +876,6 @@ export default function App() {
                 <PayPalButton />
               </div>
             </div>
-
-            {sourceType === "url" && (
-              <ErrorBoundary title="URL Conversion Form Error">
-                <UrlFetchForm
-                  inputUrl={inputUrl}
-                  setInputUrl={setInputUrl}
-                  isLoading={isLoading}
-                  onFetchUrl={handleFetchUrl}
-                  presetUrls={[
-                    { name: "Sample Article", url: "https://en.wikipedia.org/wiki/Markdown" },
-                    { name: "GitHub Markdown Spec", url: "https://github.github.com/gfm/" },
-                  ]}
-                />
-              </ErrorBoundary>
-            )}
 
             <ErrorBoundary title="Document Viewer & Converter Error">
               <SingleDocumentView
@@ -967,6 +986,22 @@ export default function App() {
         onKeyChange={(newKey) => setCustomApiKey(newKey)}
       />
 
+      {/* Convert from Web Page / Online Document URL Modal */}
+      <ConvertUrlModal
+        isOpen={isConvertUrlModalOpen}
+        onClose={() => setIsConvertUrlModalOpen(false)}
+        inputUrl={inputUrl}
+        setInputUrl={setInputUrl}
+        isLoading={isLoading}
+        onFetchUrl={handleFetchUrl}
+        presetUrls={[
+          { name: "Sample Article (Wikipedia)", url: "https://en.wikipedia.org/wiki/Markdown", description: "Standard Wikipedia encyclopedic article" },
+          { name: "GitHub Markdown Spec", url: "https://github.github.com/gfm/", description: "Official GFM specification" },
+          { name: "Playwright Automation Docs", url: "https://playwright.dev/docs/intro", description: "Technical documentation page" },
+          { name: "PostgreSQL pgvector Guide", url: "https://github.com/pgvector/pgvector", description: "Open source repository README" },
+        ]}
+      />
+
       {/* Semantic Knowledge Base Crawler Modal (Phase 2 OKF) */}
       <SemanticCrawlModal
         isOpen={isCrawlModalOpen}
@@ -1068,6 +1103,34 @@ export default function App() {
           localStorage.setItem("doc_conv_history", JSON.stringify(updated));
           addLog("success", "AI Search & Scrape Synthesis Loaded", `Grounded research report loaded: ${title}`);
         }}
+      />
+
+      {/* MetaAST Vector DB Chunk Preparer Modal */}
+      <VectorPrepModal
+        isOpen={isVectorPrepOpen}
+        onClose={() => setIsVectorPrepOpen(false)}
+        markdownContent={
+          convertedMarkdown ||
+          `# Playwright Automation Guide\n\n## Page Object Model\n\nThe Page class provides high-level APIs to interact with browser tabs.\n\n### Locators\n\nLocators represent a way to find elements on the page at any moment.\n\n\`\`\`typescript\nconst submitBtn = page.getByRole('button', { name: 'Submit' });\nawait submitBtn.click();\n\`\`\`\n\n### Comparison Table\n\n| Selector Type | Example | Resilient to Refactoring |\n| :--- | :--- | :---: |\n| Role (Recommended) | page.getByRole('button') | Yes |\n| Text | page.getByText('Log In') | Partial |\n| CSS / XPath | page.locator('.btn-primary') | No |\n`
+        }
+        documentTitle={file ? file.name.replace(/\.[^/.]+$/, "") : "Documentation Knowledge Base"}
+      />
+
+      {/* MetaAST Hierarchy & Node Explorer Modal */}
+      <AstExplorerModal
+        isOpen={isAstExplorerOpen}
+        onClose={() => setIsAstExplorerOpen(false)}
+        markdownContent={
+          convertedMarkdown ||
+          `# Playwright Automation Guide\n\n## Page Object Model\n\nThe Page class provides high-level APIs to interact with browser tabs.\n\n### Locators\n\nLocators represent a way to find elements on the page at any moment.\n\n\`\`\`typescript\nconst submitBtn = page.getByRole('button', { name: 'Submit' });\nawait submitBtn.click();\n\`\`\`\n\n### Comparison Table\n\n| Selector Type | Example | Resilient to Refactoring |\n| :--- | :--- | :---: |\n| Role (Recommended) | page.getByRole('button') | Yes |\n| Text | page.getByText('Log In') | Partial |\n| CSS / XPath | page.locator('.btn-primary') | No |\n`
+        }
+        documentTitle={file ? file.name.replace(/\.[^/.]+$/, "") : "Documentation Knowledge Base"}
+      />
+
+      {/* NLP Custom Lexicon Configuration Modal */}
+      <LexiconConfigModal
+        isOpen={isLexiconConfigOpen}
+        onClose={() => setIsLexiconConfigOpen(false)}
       />
     </div>
   );

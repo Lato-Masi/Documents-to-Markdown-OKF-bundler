@@ -4,6 +4,11 @@ import { getGeminiApiKey, getFriendlyErrorMessage, generateContentStreamWithRetr
 import { sliceMonolithToAgentSkill } from "../../src/lib/skillProceduralSlicer";
 import { validateAgentSkill } from "../../src/lib/skillValidator";
 import { classifyTextLogic } from "../../src/lib/logicClassifier";
+import {
+  parseMarkdownToAST,
+  enrichMetaAST,
+  chunkMarkdownForVectorDB,
+} from "../../src/lib/metaAst";
 
 const router = Router();
 
@@ -194,6 +199,35 @@ router.get("/mcp/manifest", (req, res) => {
           scripts: { type: "array", description: "List of script files" },
         },
         required: ["rootSkillMd"],
+      },
+    },
+    {
+      name: "parse_markdown_meta_ast",
+      description: "Deterministic AST parser that converts raw Markdown into an enriched MetaAST syntax tree with breadcrumbs, section depth, and node metadata.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          markdown: { type: "string", description: "Raw Markdown document text to parse" },
+          documentTitle: { type: "string", description: "Optional document title (default: 'Document')" },
+        },
+        required: ["markdown"],
+      },
+    },
+    {
+      name: "chunk_markdown_for_vector_db",
+      description: "Chunks Markdown using MetaAST rules for Vector DBs (Pinecone, Qdrant, pgvector, ChromaDB), preserving code/math atomicity and table headers.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          markdown: { type: "string", description: "Raw Markdown document text to chunk" },
+          maxTokensPerChunk: { type: "number", description: "Maximum token budget per chunk (default: 512)" },
+          minHeadingFlushTokens: { type: "number", description: "Tokens before heading triggers clean chunk boundary (default: 150)" },
+          includeBreadcrumbsInEmbedding: { type: "boolean", description: "Inject breadcrumb preamble in embedding text (default: true)" },
+          preserveCodeAtomicity: { type: "boolean", description: "Prevent splitting code blocks across chunks (default: true)" },
+          repeatTableHeaders: { type: "boolean", description: "Repeat table headers on split tables (default: true)" },
+          documentTitle: { type: "string", description: "Title of the document" },
+        },
+        required: ["markdown"],
       },
     },
   ];
@@ -570,6 +604,63 @@ ${concept.body}`;
                 {
                   type: "text",
                   text: JSON.stringify(validation, null, 2),
+                },
+              ],
+            },
+          });
+        }
+
+        if (name === "parse_markdown_meta_ast") {
+          const markdown = args?.markdown || "";
+          const documentTitle = args?.documentTitle || "Document";
+          const rawNodes = parseMarkdownToAST(markdown);
+          const enriched = enrichMetaAST(rawNodes, { defaultDocumentTitle: documentTitle });
+          return res.json({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(
+                    {
+                      documentTitle,
+                      totalNodes: enriched.length,
+                      nodes: enriched,
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+            },
+          });
+        }
+
+        if (name === "chunk_markdown_for_vector_db") {
+          const markdown = args?.markdown || "";
+          const chunks = chunkMarkdownForVectorDB(markdown, {
+            maxTokensPerChunk: args?.maxTokensPerChunk ?? 512,
+            minHeadingFlushTokens: args?.minHeadingFlushTokens ?? 150,
+            defaultDocumentTitle: args?.defaultDocumentTitle || args?.documentTitle || "Document",
+            extraMetadata: args?.extraMetadata,
+          });
+          return res.json({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(
+                    {
+                      documentTitle: args?.defaultDocumentTitle || args?.documentTitle || "Document",
+                      totalChunks: chunks.length,
+                      chunks,
+                    },
+                    null,
+                    2
+                  ),
                 },
               ],
             },
