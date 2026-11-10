@@ -15,6 +15,7 @@ import analysisRouter from "./server/routes/analysis";
 import mcpRouter from "./server/routes/mcp";
 import skillsRouter from "./server/routes/skills";
 import metaAstRouter from "./server/routes/metaAst";
+import remoteApiRouter from "./server/routes/remoteApi";
 
 // Load environment variables from .env
 dotenv.config();
@@ -26,9 +27,22 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Bind to 0.0.0.0:3000 immediately to ensure startup TCP health probes succeed instantly
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Open Knowledge Server running on http://0.0.0.0:${PORT}`);
+  });
+
+  // Health check endpoint (Available immediately for container probes)
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", uptime: process.uptime() });
+  });
+
   // Middleware: Allow high-resolution document and image payloads up to 50MB
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  // Register Remote API v1 Gateway (/api/v1/* with strict API key authentication & CORS)
+  app.use("/api", remoteApiRouter);
 
   // Register Core Subsystem REST Routes
   // 1. Multimodal OCR, spatial inspection, web scraping & RAG agent endpoints
@@ -41,11 +55,6 @@ async function startServer() {
   app.use("/api", skillsRouter);
   // 5. MetaAST Lexer, Parser & Vector DB Ingestion endpoints
   app.use("/api", metaAstRouter);
-
-  // Health check endpoint
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", uptime: process.uptime() });
-  });
 
   // Client Frontend Serving: Vite dev server in development vs. static assets in production
   if (process.env.NODE_ENV !== "production") {
@@ -61,11 +70,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
-
-  // Bind to 0.0.0.0:3000 for container reverse proxy routing
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Open Knowledge Server running on http://0.0.0.0:${PORT}`);
-  });
 }
 
 startServer();

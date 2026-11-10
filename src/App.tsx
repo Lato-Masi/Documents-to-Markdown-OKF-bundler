@@ -8,10 +8,11 @@ import DiagnosticConsole, { DiagnosticLog, StreamMetrics } from "./components/Di
 import { HistoryItem, ConversionMode, TargetStyle, ViewMode, SourceType, TabType, SpatialDocumentResult } from "./types";
 import { getMimeTypeByExtension } from "./utils/fileHelpers";
 import { cleanMarkdownOutput } from "./utils/markdownCleaner";
-import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search, Database, GitBranch, BookOpen } from "lucide-react";
+import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search, Database, GitBranch, BookOpen, Terminal } from "lucide-react";
 import MultiDocProcessingHub from "./components/MultiDocProcessingHub";
 import AboutModal from "./components/AboutModal";
 import ApiKeyModal from "./components/ApiKeyModal";
+import RemoteApiModal from "./components/RemoteApiModal";
 import PayPalButton from "./components/PayPalButton";
 import SemanticCrawlModal from "./components/SemanticCrawlModal";
 import StrictJsonExtractorModal from "./components/StrictJsonExtractorModal";
@@ -32,6 +33,7 @@ export default function App() {
   const [error, setError] = useState<string>("");
   const [isAboutOpen, setIsAboutOpen] = useState<boolean>(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [isRemoteApiModalOpen, setIsRemoteApiModalOpen] = useState<boolean>(false);
   const [isConvertUrlModalOpen, setIsConvertUrlModalOpen] = useState<boolean>(false);
   const [isCrawlModalOpen, setIsCrawlModalOpen] = useState<boolean>(false);
   const [isJsonExtractorOpen, setIsJsonExtractorOpen] = useState<boolean>(false);
@@ -738,9 +740,53 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-3 sm:px-6 py-4 sm:py-8 space-y-6 sm:space-y-8">
         {viewMode === "single" ? (
           <div className="space-y-6">
-            {/* Input Source Selector (File Upload vs Web URL) & Bring Your Own Key (Far Right) */}
+            {/* Top Toolbar: Remote API, Bring Your Own Key & PayPal Payment Container (Positioned above the button strip) */}
+            <div className="flex items-center justify-end gap-3 flex-wrap">
+              {/* Remote API Gateway & Developer Console Button */}
+              <button
+                id="remote-api-open-btn"
+                type="button"
+                onClick={() => setIsRemoteApiModalOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border cursor-pointer bg-emerald-950/60 hover:bg-emerald-900/60 border-emerald-700/80 text-emerald-300 hover:text-emerald-200 shadow-sm whitespace-nowrap shrink-0"
+                title="Open Remote API v1 Gateway, Key Manager, OpenAPI 3.0 Spec & Interactive Explorer"
+              >
+                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Remote API</span>
+                <span className="text-[10px] font-mono text-emerald-400/90 hidden sm:inline">/api/v1</span>
+              </button>
+
+              {/* Bring Your Own Key (BYOK) Button */}
+              <button
+                id="byok-open-modal-btn"
+                type="button"
+                onClick={() => setIsApiKeyModalOpen(true)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border cursor-pointer ${
+                  customApiKey
+                    ? "bg-amber-950/60 border-amber-800/80 text-amber-300 hover:bg-amber-900/60 hover:text-amber-200 shadow-sm"
+                    : "bg-zinc-900 hover:bg-zinc-800 border-zinc-700/80 text-zinc-300 hover:text-white"
+                }`}
+                title={
+                  customApiKey
+                    ? "Custom Gemini API Key active (Click to view, change, or remove)"
+                    : "Bring Your Own Google Gemini API Key"
+                }
+              >
+                <Key className={`w-3.5 h-3.5 ${customApiKey ? "text-amber-400" : "text-zinc-400"}`} />
+                <span>Bring Your Own Key</span>
+                {customApiKey ? (
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse ml-0.5" title="Key Active" />
+                ) : (
+                  <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline">(Optional)</span>
+                )}
+              </button>
+
+              {/* PayPal Pay for usage button */}
+              <PayPalButton />
+            </div>
+
+            {/* Input Source Selector (File Upload vs Web URL) & Action Buttons Strip */}
             <div className="flex items-center justify-between gap-2 border-b border-zinc-800 pb-2 flex-wrap">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   id="source-type-file-btn"
                   type="button"
@@ -844,36 +890,6 @@ export default function App() {
                   <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
                   <span>NLP Lexicon</span>
                 </button>
-              </div>
-
-              <div className="flex items-center gap-3 flex-wrap">
-                {/* Bring Your Own Key (BYOK) Button to the far right */}
-                <button
-                  id="byok-open-modal-btn"
-                  type="button"
-                  onClick={() => setIsApiKeyModalOpen(true)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border cursor-pointer ${
-                    customApiKey
-                      ? "bg-amber-950/60 border-amber-800/80 text-amber-300 hover:bg-amber-900/60 hover:text-amber-200 shadow-sm"
-                      : "bg-zinc-900 hover:bg-zinc-800 border-zinc-700/80 text-zinc-300 hover:text-white"
-                  }`}
-                  title={
-                    customApiKey
-                      ? "Custom Gemini API Key active (Click to view, change, or remove)"
-                      : "Bring Your Own Google Gemini API Key"
-                  }
-                >
-                  <Key className={`w-3.5 h-3.5 ${customApiKey ? "text-amber-400" : "text-zinc-400"}`} />
-                  <span>Bring Your Own Key</span>
-                  {customApiKey ? (
-                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse ml-0.5" title="Key Active" />
-                  ) : (
-                    <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline">(Optional)</span>
-                  )}
-                </button>
-
-                {/* PayPal Pay for usage button */}
-                <PayPalButton />
               </div>
             </div>
 
@@ -984,6 +1000,12 @@ export default function App() {
         isOpen={isApiKeyModalOpen}
         onClose={() => setIsApiKeyModalOpen(false)}
         onKeyChange={(newKey) => setCustomApiKey(newKey)}
+      />
+
+      {/* Remote API v1 Gateway & Developer Console Modal */}
+      <RemoteApiModal
+        isOpen={isRemoteApiModalOpen}
+        onClose={() => setIsRemoteApiModalOpen(false)}
       />
 
       {/* Convert from Web Page / Online Document URL Modal */}

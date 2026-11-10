@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for a unified, authenticated Remote API v1 (/api/v1/*) exposing all core pipelines (Document & URL Conversion, NLP Analysis, Agent Skills & Formal Logic, MetaAST & Vector DB Chunking, and MCP JSON-RPC 2.0), complete with strict API key authentication, CORS support, OpenAPI 3.0 specification, and an interactive Developer Console & API Explorer in the UI.",
+  "updatedAt":  "2026-11-10T02:23:34.039630211Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
