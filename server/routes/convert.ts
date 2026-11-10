@@ -22,6 +22,7 @@ import { executeStrictJsonExtraction, EXTRACTION_PRESETS } from "../utils/schema
 import { executeSiteMapExtraction } from "../utils/siteMapper";
 import { executeBatchUrlScrape } from "../utils/batchScraper";
 import { executeSearchAndScrape } from "../utils/searchScraper";
+import { validateSafeRemoteUrl } from "../utils/urlValidator";
 
 const router = Router();
 
@@ -654,53 +655,9 @@ ${structuredMarkdown ? `Below is the deterministic spatial text & structural anc
   }
 });
 
-// Helper: SSRF validation to block loopback, link-local, private IP spaces, and non-http/https protocols
+// Helper: SSRF validation delegated to unified urlValidator
 function isSafeUrlForFetching(rawUrl: string): { safe: boolean; reason?: string; parsedUrl?: URL } {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return { safe: false, reason: "Only HTTP and HTTPS protocols are permitted." };
-    }
-
-    const hostname = parsed.hostname.toLowerCase();
-
-    // Block localhost, loopback, and standard private hostnames
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname === "0.0.0.0" ||
-      hostname.endsWith(".local") ||
-      hostname.endsWith(".internal")
-    ) {
-      return { safe: false, reason: "Access to loopback or local hostnames is prohibited." };
-    }
-
-    // Block Cloud metadata endpoints (AWS, GCP, Azure metadata: 169.254.169.254 / metadata.google.internal)
-    if (hostname === "169.254.169.254" || hostname === "metadata.google.internal") {
-      return { safe: false, reason: "Access to cloud metadata services is prohibited." };
-    }
-
-    // Check for private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8)
-    const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (ipv4Match) {
-      const [_, o1, o2] = ipv4Match.map(Number);
-      if (
-        o1 === 10 || // 10.0.0.0/8
-        o1 === 127 || // 127.0.0.0/8
-        o1 === 0 || // 0.0.0.0/8
-        (o1 === 172 && o2 >= 16 && o2 <= 31) || // 172.16.0.0/12
-        (o1 === 192 && o2 === 168) || // 192.168.0.0/16
-        (o1 === 169 && o2 === 254) // 169.254.0.0/16 Link-Local
-      ) {
-        return { safe: false, reason: "Access to private or link-local IP addresses is prohibited." };
-      }
-    }
-
-    return { safe: true, parsedUrl: parsed };
-  } catch {
-    return { safe: false, reason: "Malformed URL format." };
-  }
+  return validateSafeRemoteUrl(rawUrl);
 }
 
 // Endpoint: POST /api/fetch-url

@@ -9,6 +9,12 @@ import {
   enrichMetaAST,
   chunkMarkdownForVectorDB,
 } from "../../src/lib/metaAst";
+import {
+  getActiveKnowledgeBase,
+  setActiveKnowledgeBase,
+  searchKnowledgeBaseConcepts,
+  findKnowledgeBaseConcept,
+} from "../utils/knowledgeBaseStore";
 
 const router = Router();
 
@@ -26,30 +32,6 @@ export interface MCPTool {
   inputSchema: object;
 }
 
-// In-memory active knowledge base cache for fast agent query
-let currentKnowledgeBase: {
-  name: string;
-  concepts: Array<{
-    id: string;
-    path: string;
-    type: string;
-    title: string;
-    description: string;
-    tags: string[];
-    status: string;
-    trustTier: string;
-    body: string;
-    prerequisites?: string[];
-    relatedConcepts?: string[];
-  }>;
-  rawMarkdown?: string;
-  updatedAt: string;
-} = {
-  name: "Default OKF Knowledge Base",
-  concepts: [],
-  updatedAt: new Date().toISOString(),
-};
-
 /**
  * Endpoint: POST /api/mcp/sync-knowledge-base
  * Allows client UI or agents to register or update the active OKF bundle
@@ -61,18 +43,17 @@ router.post("/mcp/sync-knowledge-base", (req, res) => {
       return res.status(400).json({ error: "Invalid concepts payload. Expected array of OKF concepts." });
     }
 
-    currentKnowledgeBase = {
+    const updatedKb = setActiveKnowledgeBase({
       name: name || "OKF Knowledge Base",
       concepts,
       rawMarkdown: rawMarkdown || "",
-      updatedAt: new Date().toISOString(),
-    };
+    });
 
     res.json({
       status: "synced",
-      bundleName: currentKnowledgeBase.name,
-      totalConcepts: currentKnowledgeBase.concepts.length,
-      updatedAt: currentKnowledgeBase.updatedAt,
+      bundleName: updatedKb.name,
+      totalConcepts: updatedKb.concepts.length,
+      updatedAt: updatedKb.updatedAt,
     });
   } catch (error: any) {
     console.error("MCP Sync Error:", error);
@@ -85,6 +66,7 @@ router.post("/mcp/sync-knowledge-base", (req, res) => {
  * Returns the MCP Server capability manifest, available tools, and resources list
  */
 router.get("/mcp/manifest", (req, res) => {
+  const currentKnowledgeBase = getActiveKnowledgeBase();
   const rootId = (currentKnowledgeBase.name || "okf-kb").toLowerCase().replace(/\s+/g, "-");
 
   const resources: MCPResource[] = currentKnowledgeBase.concepts.map((c) => ({
@@ -267,6 +249,7 @@ router.post("/mcp/rpc", async (req, res) => {
   }
 
   try {
+    const currentKnowledgeBase = getActiveKnowledgeBase();
     switch (method) {
       // 1. Initialize Protocol Handshake
       case "initialize": {
@@ -697,6 +680,7 @@ ${concept.body}`;
  */
 router.post("/mcp/query", async (req, res) => {
   try {
+    const currentKnowledgeBase = getActiveKnowledgeBase();
     const { query, trustTier, topK = 3, expandGraph = true } = req.body;
     if (!query) {
       return res.status(400).json({ error: "Search query is required." });

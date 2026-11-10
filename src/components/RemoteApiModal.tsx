@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   X,
   Key,
@@ -15,10 +15,13 @@ import {
   Lock,
   Code2,
   Activity,
-  ExternalLink,
-  AlertCircle,
   Eye,
   EyeOff,
+  Gauge,
+  Zap,
+  Search,
+  Filter,
+  RotateCcw,
 } from "lucide-react";
 
 interface RemoteApiKeyRecord {
@@ -29,6 +32,14 @@ interface RemoteApiKeyRecord {
   createdAt: string;
   lastUsedAt: string | null;
   requestCount: number;
+  successCount: number;
+  errorCount: number;
+  rateLimitHitCount: number;
+  rateLimitPerMinute: number;
+  currentWindowRequests: number;
+  remainingWindowQuota: number;
+  windowResetInSeconds: number;
+  utilizationPercent: number;
   status: "active" | "revoked";
 }
 
@@ -37,10 +48,33 @@ interface RemoteApiAuditLog {
   timestamp: string;
   method: string;
   path: string;
+  category: string;
   statusCode: number;
   durationMs: number;
+  keyId: string;
   keyName: string;
   keyPrefix: string;
+  clientIp?: string;
+  rateLimited?: boolean;
+}
+
+interface TrafficSummaryMetrics {
+  totalRequests: number;
+  activeRequestsInFlight: number;
+  successCount: number;
+  errorCount: number;
+  rateLimitHitCount: number;
+  successRatePercent: number;
+  avgLatencyMs: number;
+  p95LatencyMs: number;
+  requestsLastMinute: number;
+  categoryBreakdown: Record<string, number>;
+  statusCodeBreakdown: {
+    "2xx": number;
+    "4xx": number;
+    "429": number;
+    "5xx": number;
+  };
 }
 
 interface ApiEndpointDefinition {
@@ -51,6 +85,19 @@ interface ApiEndpointDefinition {
   title: string;
   description: string;
   defaultBody?: Record<string, any>;
+}
+
+function encodeUtf8Base64(str: string): string {
+  try {
+    const bytes = new TextEncoder().encode(str);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  } catch {
+    return "";
+  }
 }
 
 const API_ENDPOINTS: ApiEndpointDefinition[] = [
@@ -72,7 +119,7 @@ const API_ENDPOINTS: ApiEndpointDefinition[] = [
     defaultBody: {
       fileName: "distributed-consensus.md",
       fileType: "text/markdown",
-      base64Data: btoa(
+      base64Data: encodeUtf8Base64(
         "# Raft Consensus Protocol\n\nRaft achieves consensus via an elected **Leader** node.\n\n| Node Role | Responsibility |\n| :--- | :--- |\n| Leader | Appends log entries |\n| Follower | Replicates leader log |\n"
       ),
       conversionMode: "standard",
@@ -238,24 +285,62 @@ const API_ENDPOINTS: ApiEndpointDefinition[] = [
   },
 ];
 
+const DEFAULT_TRAFFIC: TrafficSummaryMetrics = {
+  totalRequests: 0,
+  activeRequestsInFlight: 0,
+  successCount: 0,
+  errorCount: 0,
+  rateLimitHitCount: 0,
+  successRatePercent: 100,
+  avgLatencyMs: 0,
+  p95LatencyMs: 0,
+  requestsLastMinute: 0,
+  categoryBreakdown: {
+    "Convert & Scraping": 0,
+    "NLP & OKF": 0,
+    "Skills & Logic": 0,
+    "MetaAST & Vector": 0,
+    "MCP JSON-RPC": 0,
+    System: 0,
+  },
+  statusCodeBreakdown: {
+    "2xx": 0,
+    "4xx": 0,
+    "429": 0,
+    "5xx": 0,
+  },
+};
+
 interface RemoteApiModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
 export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps) {
-  const [activeTab, setActiveTab] = useState<"explorer" | "keys" | "openapi">("explorer");
+  const [activeTab, setActiveTab] = useState<"explorer" | "traffic" | "keys" | "openapi">("explorer");
   const [keys, setKeys] = useState<RemoteApiKeyRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<RemoteApiAuditLog[]>([]);
+  const [traffic, setTraffic] = useState<TrafficSummaryMetrics>(DEFAULT_TRAFFIC);
   const [selectedKey, setSelectedKey] = useState<string>("");
   const [newKeyName, setNewKeyName] = useState<string>("");
+  const [newKeyRateLimit, setNewKeyRateLimit] = useState<number>(60);
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<RemoteApiKeyRecord | null>(null);
   const [revealedKeyIds, setRevealedKeyIds] = useState<Record<string, boolean>>({});
+  const [editingRateLimitByKey, setEditingRateLimitByKey] = useState<Record<string, number>>({});
+
+  // Traffic Monitor State
+  const [autoPollTraffic, setAutoPollTraffic] = useState<boolean>(true);
+  const [isSimulatingBurst, setIsSimulatingBurst] = useState<boolean>(false);
+  const [logSearchQuery, setLogSearchQuery] = useState<string>("");
+  const [logKeyFilter, setLogKeyFilter] = useState<string>("all");
+  const [logStatusFilter, setLogStatusFilter] = useState<"all" | "2xx" | "4xx" | "429" | "5xx">("all");
+  const [logMethodFilter, setLogMethodFilter] = useState<"all" | "GET" | "POST">("all");
 
   // Explorer state
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [selectedEndpoint, setSelectedEndpoint] = useState<ApiEndpointDefinition>(API_ENDPOINTS[0]);
   const [requestBodyText, setRequestBodyText] = useState<string>("");
+  const [jsonValidationError, setJsonValidationError] = useState<string>("");
   const [snippetLang, setSnippetLang] = useState<"curl" | "typescript" | "python">("curl");
   const [testUnauthenticated, setTestUnauthenticated] = useState<boolean>(false);
 
@@ -263,6 +348,11 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
   const [isSending, setIsSending] = useState<boolean>(false);
   const [responseStatus, setResponseStatus] = useState<number | null>(null);
   const [responseDurationMs, setResponseDurationMs] = useState<number | null>(null);
+  const [responseRateHeaders, setResponseRateHeaders] = useState<{
+    limit: string | null;
+    remaining: string | null;
+    reset: string | null;
+  } | null>(null);
   const [responseBody, setResponseBody] = useState<string>("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -279,13 +369,16 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
         const keyList: RemoteApiKeyRecord[] = data.keys || [];
         setKeys(keyList);
         setAuditLogs(data.auditLogs || []);
+        if (data.traffic) {
+          setTraffic(data.traffic);
+        }
         const firstActive = keyList.find((k) => k.status === "active");
         if (firstActive && !selectedKey) {
           setSelectedKey(firstActive.rawKey);
         }
       }
     } catch (e) {
-      console.error("Failed to load API keys:", e);
+      console.error("Failed to load API keys and traffic:", e);
     }
   };
 
@@ -308,16 +401,62 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
     }
   }, [isOpen]);
 
+  // Real-time polling when modal is open and auto-refresh is enabled
+  useEffect(() => {
+    if (!isOpen || !autoPollTraffic) return;
+    const interval = setInterval(() => {
+      fetchKeysAndLogs();
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [isOpen, autoPollTraffic, selectedKey]);
+
+  // Close modal on Escape key press
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
   useEffect(() => {
     if (selectedEndpoint.defaultBody) {
       setRequestBodyText(JSON.stringify(selectedEndpoint.defaultBody, null, 2));
     } else {
       setRequestBodyText("");
     }
+    setJsonValidationError("");
     setResponseStatus(null);
     setResponseDurationMs(null);
+    setResponseRateHeaders(null);
     setResponseBody("");
   }, [selectedEndpoint]);
+
+  const filteredLogs = useMemo(() => {
+    return auditLogs.filter((log) => {
+      if (logKeyFilter !== "all" && log.keyName !== logKeyFilter) {
+        return false;
+      }
+      if (logMethodFilter !== "all" && log.method !== logMethodFilter) {
+        return false;
+      }
+      if (logStatusFilter !== "all") {
+        if (logStatusFilter === "2xx" && (log.statusCode < 200 || log.statusCode >= 300)) return false;
+        if (logStatusFilter === "429" && log.statusCode !== 429) return false;
+        if (logStatusFilter === "4xx" && (log.statusCode < 400 || log.statusCode >= 500)) return false;
+        if (logStatusFilter === "5xx" && log.statusCode < 500) return false;
+      }
+      if (logSearchQuery.trim()) {
+        const q = logSearchQuery.toLowerCase();
+        const hay = `${log.path} ${log.keyName} ${log.category} ${log.statusCode} ${log.method}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [auditLogs, logKeyFilter, logMethodFilter, logStatusFilter, logSearchQuery]);
 
   if (!isOpen) return null;
 
@@ -333,7 +472,10 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
       const res = await fetch("/api/v1/admin/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName.trim() || "Production Remote Key" }),
+        body: JSON.stringify({
+          name: newKeyName.trim() || "Production Remote Key",
+          rateLimitPerMinute: newKeyRateLimit,
+        }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -346,6 +488,38 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
       }
     } catch (err) {
       console.error("Failed to create key:", err);
+    }
+  };
+
+  const handleUpdateKeyRateLimit = async (id: string, limit: number) => {
+    try {
+      const res = await fetch(`/api/v1/admin/keys/${id}/rate-limit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rateLimitPerMinute: limit }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setKeys(data.keys || []);
+        if (data.traffic) setTraffic(data.traffic);
+      }
+    } catch (err) {
+      console.error("Failed to update rate limit:", err);
+    }
+  };
+
+  const handleResetKeyWindow = async (id: string) => {
+    try {
+      const res = await fetch(`/api/v1/admin/keys/${id}/reset-window`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setKeys(data.keys || []);
+        if (data.traffic) setTraffic(data.traffic);
+      }
+    } catch (err) {
+      console.error("Failed to reset rate window:", err);
     }
   };
 
@@ -373,17 +547,81 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
 
   const handleClearAuditLogs = async () => {
     try {
-      await fetch("/api/v1/admin/logs/clear", { method: "POST" });
-      setAuditLogs([]);
+      const res = await fetch("/api/v1/admin/logs/clear", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setAuditLogs([]);
+        if (data.traffic) setTraffic(data.traffic);
+      }
     } catch (err) {
       console.error("Failed to clear logs:", err);
     }
   };
 
+  const handleSimulateTrafficBurst = async () => {
+    const activeKeyObj = keys.find((k) => k.rawKey === selectedKey && k.status === "active") || keys.find((k) => k.status === "active");
+    if (!activeKeyObj) return;
+
+    setIsSimulatingBurst(true);
+    try {
+      const headers = {
+        Authorization: `Bearer ${activeKeyObj.rawKey}`,
+        "Content-Type": "application/json",
+      };
+
+      const burstCalls = [
+        fetch("/api/v1/status", { method: "GET", headers }),
+        fetch("/api/v1/nlp/analyze", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            text: "Real-time API traffic monitoring measures throughput, sliding-window rate limits, and p95 latency.",
+          }),
+        }),
+        fetch("/api/v1/skills/classify-logic", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            text: "For every incoming request r, if rateWindow(r.key) exceeds threshold, return HTTP 429.",
+          }),
+        }),
+        fetch("/api/v1/meta-ast/parse", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            documentTitle: "Traffic Burst Sample",
+            markdown: "# API Telemetry\n\n## Rate Limits\nEnforced per 60-second sliding window.",
+          }),
+        }),
+        fetch("/api/v1/mcp/manifest", { method: "GET", headers }),
+      ];
+
+      await Promise.all(burstCalls);
+      await fetchKeysAndLogs();
+    } catch (err) {
+      console.error("Traffic simulation error:", err);
+    } finally {
+      setIsSimulatingBurst(false);
+    }
+  };
+
   const handleSendLiveRequest = async () => {
+    if (selectedEndpoint.method === "POST" && requestBodyText.trim()) {
+      try {
+        JSON.parse(requestBodyText);
+        setJsonValidationError("");
+      } catch (syntaxErr: any) {
+        setJsonValidationError(
+          syntaxErr?.message || "Invalid JSON syntax in Request Payload. Please fix before sending."
+        );
+        return;
+      }
+    }
+
     setIsSending(true);
     setResponseStatus(null);
     setResponseDurationMs(null);
+    setResponseRateHeaders(null);
     setResponseBody("");
 
     const startTime = performance.now();
@@ -410,6 +648,11 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
       const elapsed = Math.round(performance.now() - startTime);
       setResponseStatus(res.status);
       setResponseDurationMs(elapsed);
+      setResponseRateHeaders({
+        limit: res.headers.get("X-RateLimit-Limit"),
+        remaining: res.headers.get("X-RateLimit-Remaining"),
+        reset: res.headers.get("X-RateLimit-Reset"),
+      });
 
       const text = await res.text();
       try {
@@ -419,7 +662,6 @@ export default function RemoteApiModal({ isOpen, onClose }: RemoteApiModalProps)
         setResponseBody(text);
       }
 
-      // Refresh key usage counters and audit logs
       fetchKeysAndLogs();
     } catch (err: any) {
       const elapsed = Math.round(performance.now() - startTime);
@@ -462,7 +704,6 @@ const result = await response.json();
 console.log(result);`;
     }
 
-    // Python
     return `import requests
 
 url = "${fullUrl}"
@@ -484,18 +725,25 @@ print(response.json())`;
       ? API_ENDPOINTS
       : API_ENDPOINTS.filter((ep) => ep.category === selectedCategory);
 
+  const uniqueKeyNamesInLogs = Array.from(new Set(auditLogs.map((l) => l.keyName)));
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="remote-api-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4"
+    >
       <div className="bg-zinc-950 border border-zinc-800 rounded-xl w-full max-w-6xl h-[90vh] flex flex-col shadow-2xl overflow-hidden">
         {/* Top Modal Header */}
-        <div className="px-5 py-3.5 border-b border-zinc-800 bg-zinc-900/70 flex items-center justify-between gap-4 shrink-0">
+        <div className="px-5 py-3.5 border-b border-zinc-800 bg-zinc-900/70 flex items-center justify-between gap-4 shrink-0 flex-wrap">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
               <Terminal className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2.5">
-                <h2 className="text-base font-bold text-zinc-100 tracking-tight">
+                <h2 id="remote-api-modal-title" className="text-base font-bold text-zinc-100 tracking-tight">
                   Remote API v1 Gateway & Developer Console
                 </h2>
                 <span className="text-xs font-mono text-emerald-400">
@@ -503,15 +751,16 @@ print(response.json())`;
                 </span>
               </div>
               <p className="text-xs text-zinc-400">
-                Strict API key authentication · Cross-origin CORS enabled · All 5 core pipelines exposed
+                Strict API key authentication · Sliding-window rate limiting · Live API Traffic Monitor
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             {/* Primary Navigation Tabs */}
-            <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800">
+            <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800 overflow-x-auto no-scrollbar">
               <button
+                id="remote-api-tab-explorer"
                 type="button"
                 onClick={() => setActiveTab("explorer")}
                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
@@ -524,6 +773,23 @@ print(response.json())`;
                 <span>Interactive Explorer</span>
               </button>
               <button
+                id="remote-api-tab-traffic"
+                type="button"
+                onClick={() => setActiveTab("traffic")}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                  activeTab === "traffic"
+                    ? "bg-zinc-800 text-emerald-400 shadow-sm"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>API Traffic Monitor</span>
+                <span className="font-mono tabular-nums text-[11px] text-zinc-400">
+                  ({traffic.totalRequests})
+                </span>
+              </button>
+              <button
+                id="remote-api-tab-keys"
                 type="button"
                 onClick={() => setActiveTab("keys")}
                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
@@ -533,12 +799,13 @@ print(response.json())`;
                 }`}
               >
                 <Key className="w-3.5 h-3.5" />
-                <span>API Keys & Audit Log</span>
+                <span>API Keys</span>
                 <span className="font-mono tabular-nums text-[11px] text-zinc-400">
                   ({keys.filter((k) => k.status === "active").length})
                 </span>
               </button>
               <button
+                id="remote-api-tab-openapi"
                 type="button"
                 onClick={() => setActiveTab("openapi")}
                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
@@ -570,7 +837,6 @@ print(response.json())`;
             <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
               {/* Left Sidebar: Endpoint Catalog */}
               <div className="w-full lg:w-80 border-b lg:border-b-0 lg:border-r border-zinc-800 bg-zinc-900/30 flex flex-col shrink-0 max-h-60 lg:max-h-none">
-                {/* Category Filter Strip */}
                 <div className="p-3 border-b border-zinc-800 flex items-center gap-1 overflow-x-auto no-scrollbar">
                   {categories.map((cat) => (
                     <button
@@ -588,7 +854,6 @@ print(response.json())`;
                   ))}
                 </div>
 
-                {/* Endpoint List */}
                 <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/60">
                   {filteredEndpoints.map((ep) => {
                     const isSelected = selectedEndpoint.id === ep.id;
@@ -627,7 +892,6 @@ print(response.json())`;
 
               {/* Right Main Pane: Request Builder, Code Snippets & Live Response */}
               <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
-                {/* Endpoint Header & Active Auth Selector */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-zinc-800">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2.5 flex-wrap">
@@ -658,7 +922,6 @@ print(response.json())`;
                     <p className="text-xs text-zinc-400">{selectedEndpoint.description}</p>
                   </div>
 
-                  {/* Send Request CTA */}
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       id="remote-api-send-request-btn"
@@ -705,7 +968,7 @@ print(response.json())`;
                         .filter((k) => k.status === "active")
                         .map((k) => (
                           <option key={k.id} value={k.rawKey}>
-                            {k.name} ({k.keyPrefix})
+                            {k.name} ({k.remainingWindowQuota}/{k.rateLimitPerMinute} rpm left)
                           </option>
                         ))}
                     </select>
@@ -724,7 +987,6 @@ print(response.json())`;
 
                 {/* Two-Column Split: Request Payload & Code Generator vs. Live Response */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  {/* Column 1: Request Body & Code Snippets */}
                   <div className="space-y-4">
                     {selectedEndpoint.method === "POST" && (
                       <div className="space-y-2">
@@ -746,11 +1008,23 @@ print(response.json())`;
                         </div>
                         <textarea
                           value={requestBodyText}
-                          onChange={(e) => setRequestBodyText(e.target.value)}
+                          onChange={(e) => {
+                            setRequestBodyText(e.target.value);
+                            if (jsonValidationError) setJsonValidationError("");
+                          }}
                           rows={9}
                           spellCheck={false}
-                          className="w-full rounded-lg bg-zinc-900 border border-zinc-800 p-3 text-xs font-mono text-zinc-100 focus:outline-none focus:border-emerald-500/60"
+                          className={`w-full rounded-lg bg-zinc-900 border p-3 text-xs font-mono text-zinc-100 focus:outline-none ${
+                            jsonValidationError
+                              ? "border-red-500/80 focus:border-red-500"
+                              : "border-zinc-800 focus:border-emerald-500/60"
+                          }`}
                         />
+                        {jsonValidationError && (
+                          <p className="text-[11px] font-mono text-red-400">
+                            {jsonValidationError}
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -806,7 +1080,7 @@ print(response.json())`;
 
                   {/* Column 2: Live Response Inspector */}
                   <div className="space-y-2 flex flex-col">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
                       <span className="text-xs font-semibold text-zinc-300">
                         Live Server Response
                       </span>
@@ -816,6 +1090,8 @@ print(response.json())`;
                             className={
                               responseStatus >= 200 && responseStatus < 300
                                 ? "text-emerald-400 font-semibold"
+                                : responseStatus === 429
+                                ? "text-amber-400 font-semibold"
                                 : "text-red-400 font-semibold"
                             }
                           >
@@ -823,6 +1099,14 @@ print(response.json())`;
                           </span>
                           <span className="text-zinc-600">·</span>
                           <span className="text-zinc-400">{responseDurationMs} ms</span>
+                          {responseRateHeaders?.remaining !== null && responseRateHeaders?.limit !== null && (
+                            <>
+                              <span className="text-zinc-600">·</span>
+                              <span className="text-zinc-400">
+                                Quota: {responseRateHeaders.remaining}/{responseRateHeaders.limit} rpm
+                              </span>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
@@ -869,21 +1153,466 @@ print(response.json())`;
             </div>
           )}
 
-          {/* TAB 2: API KEYS & AUDIT LOGS */}
-          {activeTab === "keys" && (
+          {/* TAB 2: REAL-TIME API TRAFFIC MONITOR DASHBOARD */}
+          {activeTab === "traffic" && (
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
-              {/* Create New Key Section */}
-              <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-4">
+              {/* Top Control Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-zinc-800">
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-emerald-400" />
+                    <span>Real-Time API Traffic Monitor</span>
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    Live request metrics, per-key sliding-window rate-limit utilization (60s window), and usage audit logs.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <button
+                    id="simulate-traffic-burst-btn"
+                    type="button"
+                    onClick={handleSimulateTrafficBurst}
+                    disabled={isSimulatingBurst}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    title="Execute 5 concurrent API calls across pipelines to populate live traffic metrics"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>{isSimulatingBurst ? "Sending Burst..." : "Simulate 5-Call Burst"}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setAutoPollTraffic((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                      autoPollTraffic
+                        ? "bg-zinc-900 border-emerald-700/70 text-emerald-300"
+                        : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${autoPollTraffic ? "animate-spin" : ""}`} />
+                    <span>{autoPollTraffic ? "Live Polling (2s)" : "Polling Paused"}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={fetchKeysAndLogs}
+                    className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-medium text-zinc-200 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Refresh Now</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 1: Active Request Metrics (4-Column KPI Grid) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1">
+                  <div className="text-xs text-zinc-400 flex items-center justify-between">
+                    <span>Total Requests & In-Flight</span>
+                    <span className="font-mono text-[11px] text-emerald-400">
+                      {traffic.activeRequestsInFlight} active
+                    </span>
+                  </div>
+                  <div className="text-2xl font-bold font-mono tabular-nums text-zinc-100">
+                    {traffic.totalRequests}
+                  </div>
+                  <div className="text-[11px] text-zinc-400 font-mono tabular-nums">
+                    {traffic.requestsLastMinute} req/min · {traffic.statusCodeBreakdown["2xx"]} 2xx OK
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1">
+                  <div className="text-xs text-zinc-400 flex items-center justify-between">
+                    <span>Success Rate</span>
+                    <span className="font-mono text-[11px] text-zinc-400">
+                      {traffic.errorCount} errors
+                    </span>
+                  </div>
+                  <div
+                    className={`text-2xl font-bold font-mono tabular-nums ${
+                      traffic.successRatePercent >= 95
+                        ? "text-emerald-400"
+                        : traffic.successRatePercent >= 80
+                        ? "text-amber-400"
+                        : "text-red-400"
+                    }`}
+                  >
+                    {traffic.successRatePercent.toFixed(1)}%
+                  </div>
+                  <div className="text-[11px] text-zinc-400 font-mono tabular-nums">
+                    4xx: {traffic.statusCodeBreakdown["4xx"]} · 5xx: {traffic.statusCodeBreakdown["5xx"]}
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1">
+                  <div className="text-xs text-zinc-400 flex items-center justify-between">
+                    <span>Response Latency</span>
+                    <span className="font-mono text-[11px] text-cyan-400">
+                      p95: {traffic.p95LatencyMs} ms
+                    </span>
+                  </div>
+                  <div className="text-2xl font-bold font-mono tabular-nums text-zinc-100">
+                    {traffic.avgLatencyMs} <span className="text-sm font-normal text-zinc-400">ms avg</span>
+                  </div>
+                  <div className="text-[11px] text-zinc-400 font-mono tabular-nums">
+                    Measured across {traffic.totalRequests} calls
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1">
+                  <div className="text-xs text-zinc-400 flex items-center justify-between">
+                    <span>Rate-Limit Throttles (HTTP 429)</span>
+                    <span className="font-mono text-[11px] text-amber-400">
+                      60s window
+                    </span>
+                  </div>
+                  <div
+                    className={`text-2xl font-bold font-mono tabular-nums ${
+                      traffic.rateLimitHitCount > 0 ? "text-amber-400" : "text-zinc-100"
+                    }`}
+                  >
+                    {traffic.rateLimitHitCount}
+                  </div>
+                  <div className="text-[11px] text-zinc-400 font-mono tabular-nums">
+                    {keys.filter((k) => k.status === "active").length} active keys enforced
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: Per-Key Rate-Limit Status & Quota Utilization */}
+              <div className="space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
-                    <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                      <Shield className="w-4 h-4 text-amber-400" />
-                      <span>Generate New Remote API Key</span>
-                    </h3>
-                    <p className="text-xs text-zinc-400">
-                      All requests to <code className="font-mono text-zinc-300">/api/v1/*</code> require a valid active key via <code className="font-mono text-zinc-300">Authorization: Bearer &lt;key&gt;</code> or <code className="font-mono text-zinc-300">X-API-Key</code>.
+                    <h4 className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                      <Gauge className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Per-Key Rate-Limit Status & Live Quota Utilization</span>
+                    </h4>
+                    <p className="text-[11px] text-zinc-400">
+                      Configure per-minute request quotas (RPM) for each API key or reset the active 60-second sliding window.
                     </p>
                   </div>
+                </div>
+
+                <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-900/40">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-zinc-800 bg-zinc-900/80 text-[11px] font-medium text-zinc-400">
+                        <th className="py-2.5 px-4">API Key</th>
+                        <th className="py-2.5 px-4">Rate-Limit Utilization (60s Window)</th>
+                        <th className="py-2.5 px-4 text-right">Remaining</th>
+                        <th className="py-2.5 px-4 text-right">Window Reset</th>
+                        <th className="py-2.5 px-4 text-right">Total / 429s</th>
+                        <th className="py-2.5 px-4 text-right">Quota Limit (RPM)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/60 text-xs">
+                      {keys.map((k) => {
+                        const draftLimit = editingRateLimitByKey[k.id] ?? k.rateLimitPerMinute;
+                        const isThrottled = k.remainingWindowQuota === 0 && k.status === "active";
+                        const isWarning = k.utilizationPercent >= 75 && !isThrottled;
+
+                        return (
+                          <tr key={k.id} className="hover:bg-zinc-900/60">
+                            <td className="py-3 px-4">
+                              <div className="font-medium text-zinc-100">{k.name}</div>
+                              <div className="text-[11px] font-mono text-zinc-400">
+                                {k.keyPrefix} · {k.status === "active" ? "Active" : "Revoked"}
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-4 min-w-[220px]">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center justify-between text-[11px] font-mono tabular-nums">
+                                  <span
+                                    className={
+                                      isThrottled
+                                        ? "text-red-400 font-semibold"
+                                        : isWarning
+                                        ? "text-amber-400 font-semibold"
+                                        : "text-emerald-400"
+                                    }
+                                  >
+                                    {isThrottled
+                                      ? "Throttled (429 Exceeded)"
+                                      : isWarning
+                                      ? "Approaching Limit"
+                                      : "Nominal"}
+                                  </span>
+                                  <span className="text-zinc-300">
+                                    {k.currentWindowRequests} / {k.rateLimitPerMinute} req ({k.utilizationPercent}%)
+                                  </span>
+                                </div>
+                                <div className="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+                                  <div
+                                    className={`h-full transition-all duration-200 ${
+                                      isThrottled
+                                        ? "bg-red-500"
+                                        : isWarning
+                                        ? "bg-amber-500"
+                                        : "bg-emerald-500"
+                                    }`}
+                                    style={{ width: `${Math.min(100, k.utilizationPercent)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-4 text-right font-mono tabular-nums text-zinc-200">
+                              {k.remainingWindowQuota} req
+                            </td>
+
+                            <td className="py-3 px-4 text-right font-mono tabular-nums text-zinc-400">
+                              {k.currentWindowRequests > 0 ? `${k.windowResetInSeconds}s` : "Idle (60s)"}
+                            </td>
+
+                            <td className="py-3 px-4 text-right font-mono tabular-nums">
+                              <span className="text-zinc-200">{k.requestCount}</span>
+                              <span className="text-zinc-600 mx-1">/</span>
+                              <span className={k.rateLimitHitCount > 0 ? "text-amber-400 font-semibold" : "text-zinc-500"}>
+                                {k.rateLimitHitCount}
+                              </span>
+                            </td>
+
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={10000}
+                                  value={draftLimit}
+                                  onChange={(e) =>
+                                    setEditingRateLimitByKey((prev) => ({
+                                      ...prev,
+                                      [k.id]: Number(e.target.value),
+                                    }))
+                                  }
+                                  className="w-20 rounded bg-zinc-950 border border-zinc-700 px-2 py-1 text-right text-xs font-mono tabular-nums text-zinc-100 focus:outline-none focus:border-amber-500"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateKeyRateLimit(k.id, draftLimit)}
+                                  className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[11px] font-medium text-zinc-200 cursor-pointer whitespace-nowrap"
+                                >
+                                  Apply
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleResetKeyWindow(k.id)}
+                                  className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 hover:text-zinc-100 cursor-pointer"
+                                  title="Reset 60s sliding window counter"
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Section 3: Pipeline Traffic Distribution */}
+              <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-zinc-200">
+                    Pipeline Traffic Distribution
+                  </span>
+                  <span className="text-[11px] font-mono tabular-nums text-zinc-400">
+                    {traffic.totalRequests} total logged calls
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  {Object.entries(traffic.categoryBreakdown).map(([cat, count]) => {
+                    const pct =
+                      traffic.totalRequests > 0
+                        ? Math.round((count / traffic.totalRequests) * 100)
+                        : 0;
+                    return (
+                      <div key={cat} className="p-3 rounded-lg bg-zinc-950 border border-zinc-800/80 space-y-1">
+                        <div className="text-[11px] text-zinc-400 truncate">{cat}</div>
+                        <div className="flex items-baseline justify-between font-mono tabular-nums">
+                          <span className="text-sm font-bold text-zinc-100">{count}</span>
+                          <span className="text-[11px] text-zinc-500">{pct}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Section 4: Filterable API Key Usage & Request Logs */}
+              <div className="space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Filter className="w-3.5 h-3.5 text-emerald-400" />
+                    <h4 className="text-xs font-semibold text-zinc-200">
+                      API Key Usage & Request Telemetry Logs ({filteredLogs.length})
+                    </h4>
+                  </div>
+
+                  {/* Interactive Filter Bar */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={logSearchQuery}
+                        onChange={(e) => setLogSearchQuery(e.target.value)}
+                        placeholder="Search path, key, status..."
+                        className="pl-8 pr-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+
+                    <select
+                      value={logKeyFilter}
+                      onChange={(e) => setLogKeyFilter(e.target.value)}
+                      className="rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none"
+                    >
+                      <option value="all">All API Keys</option>
+                      {uniqueKeyNamesInLogs.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="flex items-center gap-1 p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg">
+                      {(["all", "2xx", "4xx", "429", "5xx"] as const).map((st) => (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => setLogStatusFilter(st)}
+                          className={`px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
+                            logStatusFilter === st
+                              ? "bg-zinc-800 text-zinc-100 font-semibold"
+                              : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          {st === "all" ? "All Status" : st}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-1 p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg">
+                      {(["all", "GET", "POST"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setLogMethodFilter(m)}
+                          className={`px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
+                            logMethodFilter === m
+                              ? "bg-zinc-800 text-zinc-100 font-semibold"
+                              : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          {m === "all" ? "All Methods" : m}
+                        </button>
+                      ))}
+                    </div>
+
+                    {auditLogs.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearAuditLogs}
+                        className="px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                      >
+                        Clear Logs
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-900/40">
+                  {filteredLogs.length === 0 ? (
+                    <div className="p-8 text-center space-y-2">
+                      <p className="text-xs font-medium text-zinc-300">
+                        No API usage logs match the current filter
+                      </p>
+                      <p className="text-[11px] text-zinc-500">
+                        Click &ldquo;Simulate 5-Call Burst&rdquo; above or send a request from the Interactive Explorer to inspect live traffic telemetry.
+                      </p>
+                    </div>
+                  ) : (
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-zinc-800 bg-zinc-900/80 text-[11px] font-medium text-zinc-400">
+                          <th className="py-2.5 px-4">Timestamp</th>
+                          <th className="py-2.5 px-4">Endpoint & Pipeline</th>
+                          <th className="py-2.5 px-4">API Key</th>
+                          <th className="py-2.5 px-4 text-right">Status</th>
+                          <th className="py-2.5 px-4 text-right">Latency</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-800/60 text-xs font-mono tabular-nums">
+                        {filteredLogs.slice(0, 50).map((log) => (
+                          <tr key={log.id} className="hover:bg-zinc-900/60">
+                            <td className="py-2.5 px-4 text-zinc-400 whitespace-nowrap">
+                              {new Date(log.timestamp).toLocaleTimeString()}
+                            </td>
+                            <td className="py-2.5 px-4">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={
+                                    log.method === "GET"
+                                      ? "text-cyan-400 font-bold"
+                                      : "text-emerald-400 font-bold"
+                                  }
+                                >
+                                  {log.method}
+                                </span>
+                                <span className="text-zinc-100">{log.path}</span>
+                                <span className="text-zinc-600">·</span>
+                                <span className="font-sans text-[11px] text-zinc-400">
+                                  {log.category}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-4 font-sans">
+                              <span className="text-zinc-200">{log.keyName}</span>
+                              <span className="text-zinc-600 mx-1">·</span>
+                              <span className="font-mono text-[11px] text-zinc-400">
+                                {log.keyPrefix}
+                              </span>
+                            </td>
+                            <td
+                              className={`py-2.5 px-4 text-right font-semibold ${
+                                log.statusCode >= 200 && log.statusCode < 300
+                                  ? "text-emerald-400"
+                                  : log.statusCode === 429
+                                  ? "text-amber-400"
+                                  : "text-red-400"
+                              }`}
+                            >
+                              {log.statusCode === 429 ? "429 Throttled" : `HTTP ${log.statusCode}`}
+                            </td>
+                            <td className="py-2.5 px-4 text-right text-zinc-300">
+                              {log.durationMs} ms
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: API KEYS & PROVISIONING */}
+          {activeTab === "keys" && (
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
+              <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-amber-400" />
+                    <span>Generate New Remote API Key</span>
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    All requests to <code className="font-mono text-zinc-300">/api/v1/*</code> require a valid active key via <code className="font-mono text-zinc-300">Authorization: Bearer &lt;key&gt;</code> or <code className="font-mono text-zinc-300">X-API-Key</code>.
+                  </p>
                 </div>
 
                 <form onSubmit={handleCreateKey} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
@@ -894,6 +1623,17 @@ print(response.json())`;
                     placeholder="Key label (e.g., Production RAG Pipeline, LangChain Worker)"
                     className="flex-1 rounded-lg bg-zinc-950 border border-zinc-800 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500"
                   />
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-zinc-400 whitespace-nowrap">Rate Limit (RPM):</label>
+                    <input
+                      type="number"
+                      min={5}
+                      max={5000}
+                      value={newKeyRateLimit}
+                      onChange={(e) => setNewKeyRateLimit(Number(e.target.value))}
+                      className="w-24 rounded-lg bg-zinc-950 border border-zinc-800 px-3 py-2 text-xs font-mono tabular-nums text-zinc-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
                   <button
                     type="submit"
                     className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
@@ -907,7 +1647,7 @@ print(response.json())`;
                   <div className="p-3.5 rounded-lg bg-emerald-950/40 border border-emerald-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div className="space-y-1">
                       <div className="text-xs font-semibold text-emerald-300">
-                        New API Key Generated: {newlyCreatedKey.name}
+                        New API Key Generated: {newlyCreatedKey.name} ({newlyCreatedKey.rateLimitPerMinute} RPM)
                       </div>
                       <code className="text-xs font-mono text-zinc-100 select-all break-all">
                         {newlyCreatedKey.rawKey}
@@ -946,7 +1686,8 @@ print(response.json())`;
                         <th className="py-2.5 px-4">Key Name</th>
                         <th className="py-2.5 px-4">Secret Token</th>
                         <th className="py-2.5 px-4">Status</th>
-                        <th className="py-2.5 px-4 text-right">Requests</th>
+                        <th className="py-2.5 px-4 text-right">Quota (60s)</th>
+                        <th className="py-2.5 px-4 text-right">Total Calls</th>
                         <th className="py-2.5 px-4">Last Used</th>
                         <th className="py-2.5 px-4 text-right">Actions</th>
                       </tr>
@@ -995,6 +1736,9 @@ print(response.json())`;
                                 {k.status === "active" ? "Active" : "Revoked"}
                               </span>
                             </td>
+                            <td className="py-3 px-4 text-right font-mono tabular-nums text-zinc-300">
+                              {k.currentWindowRequests}/{k.rateLimitPerMinute} rpm
+                            </td>
                             <td className="py-3 px-4 text-right font-mono tabular-nums text-zinc-200">
                               {k.requestCount}
                             </td>
@@ -1030,83 +1774,10 @@ print(response.json())`;
                   </table>
                 </div>
               </div>
-
-              {/* Recent Remote Request Audit Log */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
-                    <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Real-Time Remote API Request Audit Log</span>
-                  </h3>
-                  {auditLogs.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleClearAuditLogs}
-                      className="text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
-                    >
-                      Clear Audit Log
-                    </button>
-                  )}
-                </div>
-
-                <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-900/40">
-                  {auditLogs.length === 0 ? (
-                    <div className="p-6 text-center text-xs text-zinc-500">
-                      No remote API requests recorded yet. Send a test call in the Interactive Explorer to see live audit telemetry.
-                    </div>
-                  ) : (
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="border-b border-zinc-800 bg-zinc-900/80 text-[11px] font-medium text-zinc-400">
-                          <th className="py-2 px-4">Time</th>
-                          <th className="py-2 px-4">Method & Path</th>
-                          <th className="py-2 px-4">Key Used</th>
-                          <th className="py-2 px-4 text-right">Status</th>
-                          <th className="py-2 px-4 text-right">Latency</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-zinc-800/60 text-xs font-mono tabular-nums">
-                        {auditLogs.slice(0, 20).map((log) => (
-                          <tr key={log.id} className="hover:bg-zinc-900/60">
-                            <td className="py-2 px-4 text-zinc-400">
-                              {new Date(log.timestamp).toLocaleTimeString()}
-                            </td>
-                            <td className="py-2 px-4 text-zinc-200">
-                              <span
-                                className={
-                                  log.method === "GET" ? "text-cyan-400 mr-2" : "text-emerald-400 mr-2"
-                                }
-                              >
-                                {log.method}
-                              </span>
-                              <span>{log.path}</span>
-                            </td>
-                            <td className="py-2 px-4 font-sans text-zinc-300">
-                              {log.keyName}
-                            </td>
-                            <td
-                              className={`py-2 px-4 text-right font-semibold ${
-                                log.statusCode >= 200 && log.statusCode < 300
-                                  ? "text-emerald-400"
-                                  : "text-red-400"
-                              }`}
-                            >
-                              {log.statusCode}
-                            </td>
-                            <td className="py-2 px-4 text-right text-zinc-400">
-                              {log.durationMs} ms
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
             </div>
           )}
 
-          {/* TAB 3: OPENAPI 3.0.3 SPECIFICATION */}
+          {/* TAB 4: OPENAPI 3.0.3 SPECIFICATION */}
           {activeTab === "openapi" && (
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
               <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">

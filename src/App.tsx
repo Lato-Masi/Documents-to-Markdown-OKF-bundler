@@ -990,170 +990,194 @@ export default function App() {
       </main>
 
       {/* About & OKF Architecture Modal */}
-      <AboutModal
-        isOpen={isAboutOpen}
-        onClose={() => setIsAboutOpen(false)}
-      />
+      <ErrorBoundary title="About Modal Error" onReset={() => setIsAboutOpen(false)}>
+        <AboutModal
+          isOpen={isAboutOpen}
+          onClose={() => setIsAboutOpen(false)}
+        />
+      </ErrorBoundary>
 
       {/* Bring Your Own Key (BYOK) Modal */}
-      <ApiKeyModal
-        isOpen={isApiKeyModalOpen}
-        onClose={() => setIsApiKeyModalOpen(false)}
-        onKeyChange={(newKey) => setCustomApiKey(newKey)}
-      />
+      <ErrorBoundary title="API Key Modal Error" onReset={() => setIsApiKeyModalOpen(false)}>
+        <ApiKeyModal
+          isOpen={isApiKeyModalOpen}
+          onClose={() => setIsApiKeyModalOpen(false)}
+          onKeyChange={(newKey) => setCustomApiKey(newKey)}
+        />
+      </ErrorBoundary>
 
       {/* Remote API v1 Gateway & Developer Console Modal */}
-      <RemoteApiModal
-        isOpen={isRemoteApiModalOpen}
-        onClose={() => setIsRemoteApiModalOpen(false)}
-      />
+      <ErrorBoundary title="Remote API Developer Console Error" onReset={() => setIsRemoteApiModalOpen(false)}>
+        <RemoteApiModal
+          isOpen={isRemoteApiModalOpen}
+          onClose={() => setIsRemoteApiModalOpen(false)}
+        />
+      </ErrorBoundary>
 
       {/* Convert from Web Page / Online Document URL Modal */}
-      <ConvertUrlModal
-        isOpen={isConvertUrlModalOpen}
-        onClose={() => setIsConvertUrlModalOpen(false)}
-        inputUrl={inputUrl}
-        setInputUrl={setInputUrl}
-        isLoading={isLoading}
-        onFetchUrl={handleFetchUrl}
-        presetUrls={[
-          { name: "Sample Article (Wikipedia)", url: "https://en.wikipedia.org/wiki/Markdown", description: "Standard Wikipedia encyclopedic article" },
-          { name: "GitHub Markdown Spec", url: "https://github.github.com/gfm/", description: "Official GFM specification" },
-          { name: "Playwright Automation Docs", url: "https://playwright.dev/docs/intro", description: "Technical documentation page" },
-          { name: "PostgreSQL pgvector Guide", url: "https://github.com/pgvector/pgvector", description: "Open source repository README" },
-        ]}
-      />
+      <ErrorBoundary title="Convert URL Modal Error" onReset={() => setIsConvertUrlModalOpen(false)}>
+        <ConvertUrlModal
+          isOpen={isConvertUrlModalOpen}
+          onClose={() => setIsConvertUrlModalOpen(false)}
+          inputUrl={inputUrl}
+          setInputUrl={setInputUrl}
+          isLoading={isLoading}
+          onFetchUrl={handleFetchUrl}
+          presetUrls={[
+            { name: "Sample Article (Wikipedia)", url: "https://en.wikipedia.org/wiki/Markdown", description: "Standard Wikipedia encyclopedic article" },
+            { name: "GitHub Markdown Spec", url: "https://github.github.com/gfm/", description: "Official GFM specification" },
+            { name: "Playwright Automation Docs", url: "https://playwright.dev/docs/intro", description: "Technical documentation page" },
+            { name: "PostgreSQL pgvector Guide", url: "https://github.com/pgvector/pgvector", description: "Open source repository README" },
+          ]}
+        />
+      </ErrorBoundary>
 
       {/* Semantic Knowledge Base Crawler Modal (Phase 2 OKF) */}
-      <SemanticCrawlModal
-        isOpen={isCrawlModalOpen}
-        onClose={() => setIsCrawlModalOpen(false)}
-        initialSeedUrl={inputUrl || "https://playwright.dev/docs/intro"}
-        activeMarkdownContent={convertedMarkdown}
-        onKnowledgeBaseGenerated={(markdown, docName) => {
-          setConvertedMarkdown(markdown);
-          setActiveTab("preview");
-          const newItem: HistoryItem = {
-            id: Math.random().toString(36).substring(2, 9),
-            timestamp: new Date().toLocaleTimeString(),
-            fileName: docName,
-            fileSize: new Blob([markdown]).size,
-            wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
-            markdownContent: markdown,
-            sourceType: "manual",
-          };
-          const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
-          setHistory(updated);
-          localStorage.setItem("doc_conv_history", JSON.stringify(updated));
-          addLog("success", "Semantic Crawl Knowledge Base Loaded", `Compiled OKF Knowledge Base loaded into workspace: ${docName}`);
-        }}
-      />
+      <ErrorBoundary title="Semantic Crawler Modal Error" onReset={() => setIsCrawlModalOpen(false)}>
+        <SemanticCrawlModal
+          isOpen={isCrawlModalOpen}
+          onClose={() => setIsCrawlModalOpen(false)}
+          initialSeedUrl={inputUrl || "https://playwright.dev/docs/intro"}
+          activeMarkdownContent={convertedMarkdown}
+          onKnowledgeBaseGenerated={(markdown, docName) => {
+            setConvertedMarkdown(markdown);
+            setActiveTab("preview");
+            const newItem: HistoryItem = {
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: new Date().toLocaleTimeString(),
+              fileName: docName,
+              fileSize: new Blob([markdown]).size,
+              wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
+              markdownContent: markdown,
+              sourceType: "manual",
+            };
+            const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+            setHistory(updated);
+            localStorage.setItem("doc_conv_history", JSON.stringify(updated));
+            addLog("success", "Semantic Crawl Knowledge Base Loaded", `Compiled OKF Knowledge Base loaded into workspace: ${docName}`);
+          }}
+        />
+      </ErrorBoundary>
 
       {/* Strict JSON Schema Extractor Modal (Phase 3) */}
-      <StrictJsonExtractorModal
-        isOpen={isJsonExtractorOpen}
-        onClose={() => setIsJsonExtractorOpen(false)}
-        activeMarkdownContent={convertedMarkdown}
-        activeUrl={inputUrl}
-        onApplyJsonToWorkspace={(jsonString) => {
-          setConvertedMarkdown(`\`\`\`json\n${jsonString}\n\`\`\``);
-          setActiveTab("preview");
-        }}
-      />
+      <ErrorBoundary title="Strict JSON Extractor Modal Error" onReset={() => setIsJsonExtractorOpen(false)}>
+        <StrictJsonExtractorModal
+          isOpen={isJsonExtractorOpen}
+          onClose={() => setIsJsonExtractorOpen(false)}
+          activeMarkdownContent={convertedMarkdown}
+          activeUrl={inputUrl}
+          onApplyJsonToWorkspace={(jsonString) => {
+            setConvertedMarkdown(`\`\`\`json\n${jsonString}\n\`\`\``);
+            setActiveTab("preview");
+          }}
+        />
+      </ErrorBoundary>
 
       {/* Domain Sitemap & Hierarchy Mapper Modal (Phase 3) */}
-      <SiteMapperModal
-        isOpen={isSiteMapperOpen}
-        onClose={() => setIsSiteMapperOpen(false)}
-        initialDomainUrl={inputUrl || "https://playwright.dev"}
-        onSelectSingleUrl={(url) => {
-          setInputUrl(url);
-          setSourceType("url");
-        }}
-        onSelectUrlsForBatch={(urls) => {
-          setBatchScrapeInitialUrls(urls);
-          setIsBatchScraperOpen(true);
-        }}
-      />
+      <ErrorBoundary title="Site Mapper Modal Error" onReset={() => setIsSiteMapperOpen(false)}>
+        <SiteMapperModal
+          isOpen={isSiteMapperOpen}
+          onClose={() => setIsSiteMapperOpen(false)}
+          initialDomainUrl={inputUrl || "https://playwright.dev"}
+          onSelectSingleUrl={(url) => {
+            setInputUrl(url);
+            setSourceType("url");
+          }}
+          onSelectUrlsForBatch={(urls) => {
+            setBatchScrapeInitialUrls(urls);
+            setIsBatchScraperOpen(true);
+          }}
+        />
+      </ErrorBoundary>
 
       {/* Batch Multi-URL Scraper Modal (Phase 4) */}
-      <BatchUrlScraperModal
-        isOpen={isBatchScraperOpen}
-        onClose={() => {
-          setIsBatchScraperOpen(false);
-          setBatchScrapeInitialUrls([]);
-        }}
-        initialUrls={batchScrapeInitialUrls.length > 0 ? batchScrapeInitialUrls : (inputUrl ? [inputUrl] : [])}
-        activeMarkdownContent={convertedMarkdown}
-        onLoadMergedCorpus={(markdown, docName) => {
-          setConvertedMarkdown(markdown);
-          setActiveTab("preview");
-          const newItem: HistoryItem = {
-            id: Math.random().toString(36).substring(2, 9),
-            timestamp: new Date().toLocaleTimeString(),
-            fileName: docName,
-            fileSize: new Blob([markdown]).size,
-            wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
-            markdownContent: markdown,
-            sourceType: "manual",
-          };
-          const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
-          setHistory(updated);
-          localStorage.setItem("doc_conv_history", JSON.stringify(updated));
-          addLog("success", "Batch Scraped Corpus Loaded", `Batch scrape knowledge corpus loaded: ${docName}`);
-        }}
-      />
+      <ErrorBoundary title="Batch URL Scraper Modal Error" onReset={() => setIsBatchScraperOpen(false)}>
+        <BatchUrlScraperModal
+          isOpen={isBatchScraperOpen}
+          onClose={() => {
+            setIsBatchScraperOpen(false);
+            setBatchScrapeInitialUrls([]);
+          }}
+          initialUrls={batchScrapeInitialUrls.length > 0 ? batchScrapeInitialUrls : (inputUrl ? [inputUrl] : [])}
+          activeMarkdownContent={convertedMarkdown}
+          onLoadMergedCorpus={(markdown, docName) => {
+            setConvertedMarkdown(markdown);
+            setActiveTab("preview");
+            const newItem: HistoryItem = {
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: new Date().toLocaleTimeString(),
+              fileName: docName,
+              fileSize: new Blob([markdown]).size,
+              wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
+              markdownContent: markdown,
+              sourceType: "manual",
+            };
+            const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+            setHistory(updated);
+            localStorage.setItem("doc_conv_history", JSON.stringify(updated));
+            addLog("success", "Batch Scraped Corpus Loaded", `Batch scrape knowledge corpus loaded: ${docName}`);
+          }}
+        />
+      </ErrorBoundary>
 
       {/* AI Search Grounding & Deep Scrape Synthesis Modal (Phase 4) */}
-      <SearchAndScrapeModal
-        isOpen={isSearchScraperOpen}
-        onClose={() => setIsSearchScraperOpen(false)}
-        onLoadReportIntoStudio={(markdown, title) => {
-          setConvertedMarkdown(markdown);
-          setActiveTab("preview");
-          const newItem: HistoryItem = {
-            id: Math.random().toString(36).substring(2, 9),
-            timestamp: new Date().toLocaleTimeString(),
-            fileName: title,
-            fileSize: new Blob([markdown]).size,
-            wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
-            markdownContent: markdown,
-            sourceType: "manual",
-          };
-          const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
-          setHistory(updated);
-          localStorage.setItem("doc_conv_history", JSON.stringify(updated));
-          addLog("success", "AI Search & Scrape Synthesis Loaded", `Grounded research report loaded: ${title}`);
-        }}
-      />
+      <ErrorBoundary title="Search & Scrape Modal Error" onReset={() => setIsSearchScraperOpen(false)}>
+        <SearchAndScrapeModal
+          isOpen={isSearchScraperOpen}
+          onClose={() => setIsSearchScraperOpen(false)}
+          onLoadReportIntoStudio={(markdown, title) => {
+            setConvertedMarkdown(markdown);
+            setActiveTab("preview");
+            const newItem: HistoryItem = {
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: new Date().toLocaleTimeString(),
+              fileName: title,
+              fileSize: new Blob([markdown]).size,
+              wordCount: markdown.trim().split(/\s+/).filter(Boolean).length,
+              markdownContent: markdown,
+              sourceType: "manual",
+            };
+            const updated = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+            setHistory(updated);
+            localStorage.setItem("doc_conv_history", JSON.stringify(updated));
+            addLog("success", "AI Search & Scrape Synthesis Loaded", `Grounded research report loaded: ${title}`);
+          }}
+        />
+      </ErrorBoundary>
 
       {/* MetaAST Vector DB Chunk Preparer Modal */}
-      <VectorPrepModal
-        isOpen={isVectorPrepOpen}
-        onClose={() => setIsVectorPrepOpen(false)}
-        markdownContent={
-          convertedMarkdown ||
-          `# Playwright Automation Guide\n\n## Page Object Model\n\nThe Page class provides high-level APIs to interact with browser tabs.\n\n### Locators\n\nLocators represent a way to find elements on the page at any moment.\n\n\`\`\`typescript\nconst submitBtn = page.getByRole('button', { name: 'Submit' });\nawait submitBtn.click();\n\`\`\`\n\n### Comparison Table\n\n| Selector Type | Example | Resilient to Refactoring |\n| :--- | :--- | :---: |\n| Role (Recommended) | page.getByRole('button') | Yes |\n| Text | page.getByText('Log In') | Partial |\n| CSS / XPath | page.locator('.btn-primary') | No |\n`
-        }
-        documentTitle={file ? file.name.replace(/\.[^/.]+$/, "") : "Documentation Knowledge Base"}
-      />
+      <ErrorBoundary title="Vector DB Prep Modal Error" onReset={() => setIsVectorPrepOpen(false)}>
+        <VectorPrepModal
+          isOpen={isVectorPrepOpen}
+          onClose={() => setIsVectorPrepOpen(false)}
+          markdownContent={
+            convertedMarkdown ||
+            `# Playwright Automation Guide\n\n## Page Object Model\n\nThe Page class provides high-level APIs to interact with browser tabs.\n\n### Locators\n\nLocators represent a way to find elements on the page at any moment.\n\n\`\`\`typescript\nconst submitBtn = page.getByRole('button', { name: 'Submit' });\nawait submitBtn.click();\n\`\`\`\n\n### Comparison Table\n\n| Selector Type | Example | Resilient to Refactoring |\n| :--- | :--- | :---: |\n| Role (Recommended) | page.getByRole('button') | Yes |\n| Text | page.getByText('Log In') | Partial |\n| CSS / XPath | page.locator('.btn-primary') | No |\n`
+          }
+          documentTitle={file ? file.name.replace(/\.[^/.]+$/, "") : "Documentation Knowledge Base"}
+        />
+      </ErrorBoundary>
 
       {/* MetaAST Hierarchy & Node Explorer Modal */}
-      <AstExplorerModal
-        isOpen={isAstExplorerOpen}
-        onClose={() => setIsAstExplorerOpen(false)}
-        markdownContent={
-          convertedMarkdown ||
-          `# Playwright Automation Guide\n\n## Page Object Model\n\nThe Page class provides high-level APIs to interact with browser tabs.\n\n### Locators\n\nLocators represent a way to find elements on the page at any moment.\n\n\`\`\`typescript\nconst submitBtn = page.getByRole('button', { name: 'Submit' });\nawait submitBtn.click();\n\`\`\`\n\n### Comparison Table\n\n| Selector Type | Example | Resilient to Refactoring |\n| :--- | :--- | :---: |\n| Role (Recommended) | page.getByRole('button') | Yes |\n| Text | page.getByText('Log In') | Partial |\n| CSS / XPath | page.locator('.btn-primary') | No |\n`
-        }
-        documentTitle={file ? file.name.replace(/\.[^/.]+$/, "") : "Documentation Knowledge Base"}
-      />
+      <ErrorBoundary title="AST Explorer Modal Error" onReset={() => setIsAstExplorerOpen(false)}>
+        <AstExplorerModal
+          isOpen={isAstExplorerOpen}
+          onClose={() => setIsAstExplorerOpen(false)}
+          markdownContent={
+            convertedMarkdown ||
+            `# Playwright Automation Guide\n\n## Page Object Model\n\nThe Page class provides high-level APIs to interact with browser tabs.\n\n### Locators\n\nLocators represent a way to find elements on the page at any moment.\n\n\`\`\`typescript\nconst submitBtn = page.getByRole('button', { name: 'Submit' });\nawait submitBtn.click();\n\`\`\`\n\n### Comparison Table\n\n| Selector Type | Example | Resilient to Refactoring |\n| :--- | :--- | :---: |\n| Role (Recommended) | page.getByRole('button') | Yes |\n| Text | page.getByText('Log In') | Partial |\n| CSS / XPath | page.locator('.btn-primary') | No |\n`
+          }
+          documentTitle={file ? file.name.replace(/\.[^/.]+$/, "") : "Documentation Knowledge Base"}
+        />
+      </ErrorBoundary>
 
       {/* NLP Custom Lexicon Configuration Modal */}
-      <LexiconConfigModal
-        isOpen={isLexiconConfigOpen}
-        onClose={() => setIsLexiconConfigOpen(false)}
-      />
+      <ErrorBoundary title="NLP Lexicon Modal Error" onReset={() => setIsLexiconConfigOpen(false)}>
+        <LexiconConfigModal
+          isOpen={isLexiconConfigOpen}
+          onClose={() => setIsLexiconConfigOpen(false)}
+        />
+      </ErrorBoundary>
     </div>
   );
 }

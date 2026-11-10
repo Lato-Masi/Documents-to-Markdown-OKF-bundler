@@ -1,123 +1,91 @@
-# Remote API v1 & Interactive Developer Console
+# Production Hardening, Security, Resiliency & Quality Audit Plan
 
-Deliver a unified, cross-origin enabled Remote REST & JSON-RPC API (`/api/v1/*`) across all core application pipelines—protected by strict API key authentication—alongside an interactive Developer Console with live endpoint testing, OpenAPI 3.0 specification export, and multi-language SDK snippets (`cURL`, `TypeScript/Node.js`, `Python`).
+Deliver a comprehensive full-stack production hardening pass across security, data persistence, error boundaries, server resiliency, pipeline consistency, and accessibility based on a complete architectural audit of the codebase.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following architectural decisions incorporate your confirmed selections from Phase 1:
+> The following production hardening decisions incorporate your confirmed selections from Phase 1:
 
-- **Confirmed Decision 1 — Full Pipeline Coverage**: All five core capability domains (`Convert`, `NLP Analysis`, `Agent Skills & Formal Logic`, `MetaAST & Vector DB Prep`, and `MCP JSON-RPC 2.0`) will be exposed under clean, versioned `/api/v1/*` remote endpoints with structured JSON responses (plus optional SSE/chunked streaming where requested).
-- **Confirmed Decision 2 — Strict API Key Authentication**: Every remote `/api/v1/*` call requires a valid API key passed via `Authorization: Bearer <API_KEY>` or `X-API-Key: <API_KEY>` header. Users can generate, rotate, label, and revoke remote API keys from the in-app Developer Console (with an optional server-level `REMOTE_API_KEY` environment variable supported for headless/CI deployments).
-- **Confirmed Decision 3 — Interactive Developer Experience**: A dedicated **Remote API & Developer Console** modal/workspace will provide API key management, an interactive request tester, a downloadable/live OpenAPI 3.0 specification (`/api/v1/openapi.json`), and copy-ready code snippets in `cURL`, `TypeScript`, and `Python`.
+- **Confirmed Decision 1 — Full-Stack Production Hardening**: Remediate all identified security, error boundary, resiliency, consistency, and accessibility findings across both the Express backend and React frontend.
+- **Confirmed Decision 2 — Persistent Disk Storage for API Keys & Audit Logs**: Persist API keys, sliding-window quota configurations, and request audit logs to disk (`.data/remote-api-store.json` with atomic write-and-rename and debounced flush) so server restarts preserve all keys and traffic history.
+- **Confirmed Decision 3 — Secured `/api/v1/admin/*` Management Routes**: Protect all `/api/v1/admin/*` endpoints against cross-origin abuse using strict same-origin / `Sec-Fetch-Site` verification (for the local browser Developer Console) or a valid `X-Admin-Token` / master `REMOTE_API_KEY` header for authorized administrative callers.
 
 ---
 
-## 1. Overview & Core Concept
+## 1. Overview & Audit Findings Summary
 
-- **What It Does**: Exposes the application's document conversion, web scraping, NLP analysis, Agent Skill compilation, MetaAST parsing, and MCP JSON-RPC engines as a secure, remotely callable REST API. External scripts, CI/CD pipelines, autonomous AI agents, and third-party services can invoke these endpoints directly over HTTPS.
-- **Target Audience / Persona**: Software engineers, AI/RAG pipeline builders, and technical teams integrating high-fidelity document-to-Markdown conversion, OKF knowledge structuring, and vector chunking into remote workflows.
-- **Key Value**: Transforms the browser-based studio into a headless, programmable microservice with zero-friction testing, strict access control, and standards-compliant OpenAPI 3.0 documentation.
+Our audit evaluated the application across **7 production readiness pillars**:
+
+1. **Security & Cryptography**:
+   - *Finding*: API key comparisons used standard string equality (`===`), and SSRF validation in `remoteApi.ts` checked hostnames without blocking private IPv4/IPv6 CIDR ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `fc00::/7`, `fe80::/10`). Additionally, `/api/v1/admin/*` routes inherited the wildcard `Access-Control-Allow-Origin: *` policy.
+   - *Remediation*: Implement constant-time `crypto.timingSafeEqual` key verification, unify a comprehensive IPv4/IPv6 SSRF guard across all URL-fetching routes, restrict `/api/v1/admin/*` with same-origin + `X-Console-Client` / admin token verification, and add baseline HTTP security headers (`X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Request-Id`).
+2. **Durability & State Persistence**:
+   - *Finding*: API keys and traffic audit logs were stored strictly in volatile memory and reset whenever the server restarted.
+   - *Remediation*: Implement an atomic JSON persistence layer (`.data/remote-api-store.json`) with automatic hydration on startup and debounced non-blocking disk writes.
+3. **Consistency & Pipeline Unification**:
+   - *Finding*: The Remote API's `/api/v1/mcp/*` endpoints returned static stub responses for `search_okf_concepts`, `get_okf_concept`, `traverse_okf_graph`, and `/api/v1/mcp/query` instead of querying the live `currentKnowledgeBase` state in `mcp.ts`.
+   - *Remediation*: Extract a shared Knowledge Base store module so `/api/mcp/*` and `/api/v1/mcp/*` operate on the exact same live OKF concepts, graph edges, and resources.
+4. **Backend Resiliency & Global Error Handling**:
+   - *Finding*: Malformed JSON payloads (`SyntaxError` from `express.json()`) or unhandled async errors returned default HTML stack traces instead of structured JSON, and `server.ts` lacked `SIGTERM`/`SIGINT` graceful shutdown handlers.
+   - *Remediation*: Add a global Express JSON error-handling middleware that catches payload parse errors (`400 INVALID_JSON_PAYLOAD`) and unexpected exceptions (`500 INTERNAL_SERVER_ERROR`) without leaking stack traces, plus graceful server shutdown hooks.
+5. **Frontend Error Boundaries**:
+   - *Finding*: While the main document views in `App.tsx` were wrapped in `<ErrorBoundary>`, the 11 interactive modals (`RemoteApiModal`, `SemanticCrawlModal`, `StrictJsonExtractorModal`, `SiteMapperModal`, `BatchUrlScraperModal`, `SearchAndScrapeModal`, `VectorPrepModal`, `AstExplorerModal`, `ConvertUrlModal`, `ApiKeyModal`, `LexiconConfigModal`) were rendered outside error boundaries—meaning a rendering exception inside any modal would crash the entire application.
+   - *Remediation*: Wrap all modal subsystems in isolated `<ErrorBoundary>` containers with recovery actions.
+6. **Usability, Keyboard Navigation & UTF-8 Safety**:
+   - *Finding*: `RemoteApiModal` used raw `btoa()` which throws `InvalidCharacterError` on Unicode strings, lacked `Escape` key dismissal, and did not validate JSON syntax in the Interactive Explorer before sending POST requests.
+   - *Remediation*: Use UTF-8 safe `TextEncoder` base64 encoding, add `Escape` key listener and `role="dialog"` / `aria-modal="true"` attributes, and validate JSON payloads client-side with clear inline feedback before dispatching POST requests.
 
 ---
 
 ## 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  1. **Accessing the Console**: Users click the **Remote API** button in the top toolbar to open the Developer Console.
-  2. **Managing API Keys**: In the **API Keys & Security** tab, users view their active API keys (with masked previews and tabular request counters), generate new named keys (e.g., `Production RAG Worker`), copy the secret token, or revoke existing keys.
-  3. **Exploring & Testing Endpoints**: In the **Interactive API Explorer** tab, users select any endpoint across the 5 pipeline categories, inspect required/optional JSON parameters, edit the request payload, and click **Send Live Request** to inspect the real HTTP status code, latency (`ms`), response headers, and formatted JSON output.
-  4. **Copying SDK Snippets & OpenAPI Spec**: Users switch between `cURL`, `TypeScript (fetch)`, and `Python (requests)` tabs with their active base URL and API key pre-filled, or download/copy the full OpenAPI 3.0 JSON specification (`/api/v1/openapi.json`).
+  - **Seamless Recovery in Modals**: If any modal encounters an unexpected runtime error, an isolated Error Boundary card appears inside the modal overlay with a **Reset & Close** button, keeping the user's converted Markdown and workspace state intact.
+  - **Pre-Flight JSON Validation in API Explorer**: When editing JSON request bodies in the Interactive Explorer, malformed JSON is immediately flagged with a crisp diagnostic message before the request is sent.
+  - **Keyboard & Accessibility Ergonomics**: Pressing `Esc` cleanly closes active modals; all interactive controls include accessible titles, `focus-visible` rings, and tabular numeral alignment (`tabular-nums`).
 - **Visual Identity & Theme**:
-  - *Aesthetic Direction*: High-contrast technical developer console matching the existing zinc dark-mode workspace (`bg-zinc-950`, `bg-zinc-900` structural surfaces, `border-zinc-800` 1px hairlines).
-  - *Color Palette & Mood*: Dominant neutral dark slate canvas (`#09090B` / `#18181B`), crisp zinc typography (`#F4F4F5` primary, `#A1A1AA` muted), and semantic accents (`#10B981` emerald for `POST`/`200 OK`, `#06B6D4` cyan for `GET`, `#F59E0B` amber for authentication keys, `#EF4444` crimson for `401`/`403`/`500` errors).
-  - *Typography & Hierarchy*: Clean sans-serif UI headings paired with strict monospace (`JetBrains Mono` / `font-mono tabular-nums`) for HTTP paths, status codes, latency metrics, key hashes, and JSON payloads.
-  - *Component Styling & Layout*: Single-elevation split-pane workbench (Left sidebar: categorized endpoint catalog + key manager; Right pane: parameter editor, code generator, and live response inspector).
-- **Interactive Feedback & Motion**: Instant `<150ms` tab transitions, one-click clipboard copy confirmation states, live request spinner with elapsed millisecond counter, and clear `401 Unauthorized` diagnostic banners when testing without a valid key.
+  - Preserves the high-contrast dark zinc developer console aesthetic (`bg-zinc-950`, `bg-zinc-900`, `border-zinc-800`, emerald/amber/cyan/rose semantic status indicators, and `font-mono tabular-nums` telemetry).
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Versioned `/api/v1/*` Gateway vs. Modifying Internal UI Routes**
-  - *Chosen Approach*: Mount a dedicated `/api/v1` router protected by strict API key authentication and permissive CORS headers (`Access-Control-Allow-Origin: *`), while keeping the existing internal `/api/*` routes intact for the browser UI.
-  - *Why*: Ensures the web interface continues functioning seamlessly for interactive users without breaking existing components, while remote consumers get a clean, uniform JSON API contract (`{ success, data, meta: { requestId, durationMs } }`) and strict authentication enforcement.
-  - *Alternatives Considered*: Enforcing API keys directly on existing `/api/*` routes, which would block the local web UI unless every frontend `fetch()` call was retrofitted with session tokens.
-- **Decision 2: Synchronous JSON Default with Optional Streaming for Remote Clients**
-  - *Chosen Approach*: Remote `/api/v1/convert` and `/api/v1/fetch-url` endpoints return structured JSON (`{ success: true, markdown, metadata }`) by default when `Accept: application/json` (or `stream: false`) is used, while supporting chunked text streaming when `stream: true` is passed.
-  - *Why*: Remote programmatic clients (Python scripts, webhooks, LangChain/LlamaIndex loaders) strongly prefer deterministic JSON payloads over raw chunked text with heartbeat banners.
-- **Decision 3: Hybrid API Key Store (Server Memory + Persistent Local Sync + Env Variable)**
-  - *Chosen Approach*: Support a pre-configured `REMOTE_API_KEY` environment variable alongside dynamically generated `okf_live_...` keys managed via the Developer Console and persisted across sessions, with per-key usage timestamps and request counts.
-  - *Why*: Allows instant out-of-the-box testing from the UI and external terminals (`curl`) while supporting headless server deployments via `.env`.
+- **Decision 1: Atomic Disk Persistence vs. External Database**
+  - *Chosen Approach*: Store API keys, rate-limit settings, and recent audit logs in `.data/remote-api-store.json` using atomic temp-file write + rename and debounced saves.
+  - *Why*: Zero external infrastructure dependencies, instant startup hydration, crash-safe writes, and full compatibility with containerized environments.
+- **Decision 2: Same-Origin + Custom Header Guard for `/api/v1/admin/*`**
+  - *Chosen Approach*: Split CORS policies so `/api/v1/admin/*` rejects cross-origin browser requests (`Sec-Fetch-Site: cross-site` or mismatched `Origin`) unless authenticated with a valid `Authorization: Bearer <MASTER_KEY>` or `X-Console-Client: okf-internal-console` from the same host.
+  - *Why*: Prevents malicious third-party websites from silently enumerating or revoking a user's API keys via cross-origin `fetch()` calls while keeping the in-app Developer Console seamless.
 
 ---
 
 ## 4. Technical Architecture & Data Strategy *(Technical Reference)*
 
-- **Architecture & Component Diagram**:
-
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                   External Clients (cURL, Python, Node, MCP)               │
-└─────────────────────────────────────┬──────────────────────────────────────┘
-                                      │ HTTPS + CORS
-                                      │ Header: Authorization: Bearer okf_...
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                     Express Server Gateway (server.ts)                     │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │               Remote API v1 Router (/api/v1/*)                       │  │
-│  │  • CORS Middleware (Origin: *, Headers: Authorization, X-API-Key)    │  │
-│  │  • Strict Auth Middleware (Validates okf_live_* or REMOTE_API_KEY)   │  │
-│  │  • Request Audit Logger (Tracks latency, status, endpoint usage)     │  │
-│  └──────┬───────────────┬───────────────┬───────────────┬───────────────┘  │
-│         │               │               │               │                  │
-│         ▼               ▼               ▼               ▼                  │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐            │
-│  │ Convert &  │  │ NLP & OKF  │  │   Skills   │  │ MetaAST &  │            │
-│  │  Scraping  │  │  Analysis  │  │  & Logic   │  │  MCP RPC   │            │
-│  └────────────┘  └────────────┘  └────────────┘  └────────────┘            │
-└────────────────────────────────────────────────────────────────────────────┘
-                                      ▲
-                                      │ Key Management & Live Testing
-┌─────────────────────────────────────┴──────────────────────────────────────┐
-│               Frontend Developer Console (RemoteApiModal.tsx)              │
-│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐  │
-│  │ API Key Manager      │  │ Interactive Explorer │  │ OpenAPI 3.0 &    │  │
-│  │ (Create/Revoke/Logs) │  │ (Try It Out + JSON)  │  │ SDK Code Gen     │  │
-│  └──────────────────────┘  └──────────────────────┘  └──────────────────┘  │
+│                        Express Server (server.ts)                          │
+│  • Security Headers (X-Content-Type-Options, Referrer-Policy, X-Request-Id)│
+│  • Global JSON Error Boundary Middleware (400 Bad JSON / 500 Safe Error)   │
+│  • Graceful Shutdown Handler (SIGTERM / SIGINT)                            │
+└───────────────┬────────────────────────────────────────┬───────────────────┘
+                │                                        │
+                ▼                                        ▼
+┌───────────────────────────────────────┐  ┌─────────────────────────────────┐
+│   Admin Guard (/api/v1/admin/*)       │  │ Remote Gateway (/api/v1/*)      │
+│  • Same-Origin / Sec-Fetch-Site Check │  │  • Wildcard CORS for 3P Clients │
+│  • X-Console-Client / Admin Auth      │  │  • Timing-Safe Key Verification │
+└───────────────┬───────────────────────┘  │  • Sliding-Window Rate Limiter  │
+                │                          │  • Unified IPv4/IPv6 SSRF Guard │
+                ▼                          └─────────────┬───────────────────┘
+┌────────────────────────────────────────────────────────┴───────────────────┐
+│              Shared Core Stores & Persistent Disk Layer                    │
+│  • .data/remote-api-store.json (Atomic Write + Startup Hydration)          │
+│  • Shared OKF Knowledge Base Store (Unifies /api/mcp & /api/v1/mcp)        │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
-
-- **Remote API v1 Endpoint Catalog (`/api/v1/*`)**:
-  - `GET /api/v1/openapi.json` — Returns the complete OpenAPI 3.0.3 specification dynamically bound to the server's public URL.
-  - `GET /api/v1/status` — Authenticated health, pipeline readiness, and key verification endpoint.
-  - **1. Convert & Web Extraction Pipeline**:
-    - `POST /api/v1/convert/file` — Converts base64-encoded PDF, DOCX, XLSX, CSV, HTML, or Image into clean Markdown + spatial quality diagnostics.
-    - `POST /api/v1/convert/url` — Fetches and converts any public URL or document link into clean Markdown with metadata.
-    - `POST /api/v1/extract/json` — Extracts strict schema-validated JSON from raw content or a target URL.
-    - `POST /api/v1/site/discover` — Inspects domain `robots.txt`, `llms.txt`, and sitemaps.
-    - `POST /api/v1/site/map` — Maps domain URLs and hierarchy.
-  - **2. NLP & OKF Intelligence Pipeline**:
-    - `POST /api/v1/nlp/analyze` — Computes Flesch-Kincaid readability, SMOG index, sentiment, language detection, and keywords.
-    - `POST /api/v1/okf/agent` — Runs OKF v1.0 synthesis, compliance auditing, or grounded Q&A.
-  - **3. Agent Skills & Formal Logic Pipeline**:
-    - `POST /api/v1/skills/synthesize` — Slices monolithic Markdown runbooks into progressive-disclosure Agent Skill packages (`SKILL.md`, `references/`, `scripts/`).
-    - `POST /api/v1/skills/validate` — Runs 6-point preflight validation and best-practices auditing.
-    - `POST /api/v1/skills/classify-logic` — Performs formal First-Order, Higher-Order, Modal, and Temporal logic classification.
-  - **4. MetaAST & Vector DB Pipeline**:
-    - `POST /api/v1/meta-ast/parse` — Parses Markdown into an enriched MetaAST block syntax tree.
-    - `POST /api/v1/meta-ast/vector-chunks` — Chunks Markdown for vector databases (Pinecone, Qdrant, pgvector) preserving code and table atomicity.
-  - **5. Model Context Protocol (MCP)**:
-    - `GET /api/v1/mcp/manifest` — Lists registered MCP tools and OKF resources.
-    - `POST /api/v1/mcp/rpc` — Executes JSON-RPC 2.0 methods (`initialize`, `tools/list`, `tools/call`, `resources/read`).
-    - `POST /api/v1/mcp/query` — Executes graph-expanded concept queries against the active knowledge base.
-
-- **Data Model & State**:
-  - `ApiKeyRecord`: `{ id, name, keyPrefix, keyHash, createdAt, lastUsedAt, requestCount, status: 'active' | 'revoked' }`.
-  - `ApiAuditLogEntry`: `{ id, timestamp, method, path, statusCode, durationMs, keyName }`.
 
 - **Interactive Component & State Mapping**:
-  - **Top Toolbar Trigger (`src/App.tsx`)**: Adds a **Remote API** button (`button#remote-api-open-btn`) in the top toolbar next to the Bring Your Own Key button to launch `RemoteApiModal`.
-  - **Key Management (`RemoteApiModal.tsx`)**: Creating a key calls the key management endpoint, displays the generated `okf_live_...` secret once with a one-click copy button, and auto-populates the active key in the Interactive Explorer and SDK code generators.
-  - **Live Request Tester**: Selecting an endpoint loads a realistic default JSON body; clicking **Send Request** executes a real `fetch` against `/api/v1/...` with the `Authorization: Bearer <key>` header, updating the response viewer and the live request audit log.
+  - **Unified SSRF Guard**: Centralizes `validateSafeRemoteUrl(url)` in `urlValidator.ts` blocking loopback, link-local, RFC 1918 private IPv4 ranges, IPv6 unique-local/link-local addresses, and cloud metadata endpoints across both `convert.ts` and `remoteApi.ts`.
+  - **Shared MCP Knowledge Base**: Synchronizes concepts across the UI's Multi-Doc Studio, `/api/mcp/*`, and `/api/v1/mcp/*` so remote agents can search, read, and traverse the active knowledge graph.
+  - **Modal Error Boundaries & Keyboard UX**: Wraps modal instances in `App.tsx` with `<ErrorBoundary>` and adds `Escape` key handling and pre-flight JSON validation in `RemoteApiModal.tsx`.

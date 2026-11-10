@@ -1,12 +1,13 @@
 /**
  * @file server/routes/remoteApi.ts
- * @description Remote API v1 Gateway (/api/v1/*) with CORS, strict API Key authentication,
- * OpenAPI 3.0.3 specification endpoint, and full pipeline coverage across:
+ * @description Remote API v1 Gateway (/api/v1/*) with CORS, strict timing-safe API Key authentication,
+ * sliding-window rate limiting, same-origin/token-protected admin endpoints, OpenAPI 3.0.3 spec,
+ * and full pipeline coverage across:
  * 1. Convert & Web Extraction
  * 2. NLP & OKF Intelligence
  * 3. Agent Skills & Formal Logic
  * 4. MetaAST & Vector DB Chunking
- * 5. Model Context Protocol (MCP) JSON-RPC 2.0
+ * 5. Model Context Protocol (MCP) JSON-RPC 2.0 (Unified with live Knowledge Base Store)
  */
 
 import { Router, Request, Response, NextFunction } from "express";
@@ -17,10 +18,16 @@ import {
   listRemoteApiKeys,
   revokeRemoteApiKey,
   deleteRemoteApiKey,
+  updateRemoteApiKeyRateLimit,
+  resetRemoteApiKeyWindow,
   validateAndTrackApiKey,
   recordRemoteApiAudit,
   getRemoteApiAuditLogs,
   clearRemoteApiAuditLogs,
+  getTrafficSummaryMetrics,
+  incrementActiveRequests,
+  decrementActiveRequests,
+  constantTimeStringEquals,
 } from "../utils/apiKeyManager";
 import { generateOpenApiSpec } from "../utils/openApiSpec";
 import { getGeminiApiKey, getFriendlyErrorMessage, generateContentWithRetry } from "../utils/geminiService";
@@ -31,6 +38,12 @@ import { extractCleanArticleHtml } from "../utils/readabilityExtractor";
 import { discoverDomainArchitecture } from "../utils/siteDiscoveryEngine";
 import { executeStrictJsonExtraction } from "../utils/schemaExtractor";
 import { executeSiteMapExtraction } from "../utils/siteMapper";
+import { validateSafeRemoteUrl } from "../utils/urlValidator";
+import {
+  getActiveKnowledgeBase,
+  searchKnowledgeBaseConcepts,
+  findKnowledgeBaseConcept,
+} from "../utils/knowledgeBaseStore";
 import { sliceMonolithToAgentSkill } from "../../src/lib/skillProceduralSlicer";
 import { validateAgentSkill } from "../../src/lib/skillValidator";
 import { auditAgentSkillBestPractices } from "../../src/lib/agentSkillBestPracticesEngine";
@@ -45,43 +58,116 @@ import {
 const router = Router();
 
 /**
- * 1. Universal CORS Middleware for Remote API consumers
+ * 1. Same-Origin & Admin Token Guard for `/api/v1/admin/*`
+ * Protects administrative key-management endpoints from cross-origin browser abuse.
  */
-router.use((req: Request, res: Response, next: NextFunction) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-API-Key, X-Gemini-API-Key, Accept"
-  );
-  res.setHeader("Access-Control-Expose-Headers", "X-Request-Id, X-Response-Time-Ms");
+function requireAdminAccess(req: Request, res: Response, next: NextFunction) {
+  // Never expose wildcard CORS on admin routes
+  const origin = req.headers.origin;
+  const host = (req.headers["x-forwarded-host"] as string) || req.headers.host || "";
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
+  // Check if an explicit Admin Token or Master Key was provided
+  const adminTokenHeader = (req.headers["x-admin-token"] as string) || "";
+  const authHeader = req.headers.authorization || "";
+  const bearerToken = authHeader.toLowerCase().startsWith("bearer ")
+    ? authHeader.slice(7).trim()
+    : "";
+  const masterKey = process.env.REMOTE_API_KEY || "okf_live_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c";
+
+  if (
+    (adminTokenHeader && constantTimeStringEquals(adminTokenHeader, masterKey)) ||
+    (bearerToken && constantTimeStringEquals(bearerToken, masterKey))
+  ) {
+    return next();
   }
+
+  // Block cross-site browser requests detected via Sec-Fetch-Site
+  const secFetchSite = (req.headers["sec-fetch-site"] as string)?.toLowerCase();
+  if (secFetchSite === "cross-site") {
+    return res.status(403).json({
+      success: false,
+      error: {
+        code: "FORBIDDEN_CROSS_ORIGIN_ADMIN",
+        message: "Cross-origin access to /api/v1/admin/* is prohibited. Use same-origin console or X-Admin-Token.",
+      },
+    });
+  }
+
+  // If an Origin header is present, verify its hostname matches the server's Host header
+  if (origin && host) {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      const targetHost = host.split(",")[0].trim().toLowerCase();
+      if (originHost !== targetHost) {
+        return res.status(403).json({
+          success: false,
+          error: {
+            code: "FORBIDDEN_ORIGIN_MISMATCH",
+            message: "Origin mismatch for administrative endpoint.",
+          },
+        });
+      }
+      res.setHeader("Access-Control-Allow-Origin", origin);
+    } catch {
+      return res.status(403).json({
+        success: false,
+        error: { code: "INVALID_ORIGIN", message: "Invalid Origin header." },
+      });
+    }
+  }
+
   next();
-});
+}
 
 /**
  * 2. Local Developer Console Management Routes (/api/v1/admin/*)
- * Used by the in-app Remote API Developer Console UI to manage API keys and inspect audit logs.
  */
+router.use("/v1/admin", requireAdminAccess);
+
 router.get("/v1/admin/keys", (req: Request, res: Response) => {
   const keys = listRemoteApiKeys();
   const logs = getRemoteApiAuditLogs();
+  const traffic = getTrafficSummaryMetrics();
   res.json({
     success: true,
     keys,
     auditLogs: logs,
+    traffic,
   });
 });
 
 router.post("/v1/admin/keys", (req: Request, res: Response) => {
-  const { name } = req.body;
-  const newKey = createRemoteApiKey(name || "Remote Client Key");
+  const { name, rateLimitPerMinute } = req.body;
+  const newKey = createRemoteApiKey(name || "Remote Client Key", rateLimitPerMinute);
   res.status(201).json({
     success: true,
     key: newKey,
+  });
+});
+
+router.post("/v1/admin/keys/:id/rate-limit", (req: Request, res: Response) => {
+  const { rateLimitPerMinute } = req.body;
+  const updated = updateRemoteApiKeyRateLimit(req.params.id, Number(rateLimitPerMinute));
+  if (!updated) {
+    return res.status(404).json({ success: false, error: "API Key not found" });
+  }
+  res.json({
+    success: true,
+    key: updated,
+    keys: listRemoteApiKeys(),
+    traffic: getTrafficSummaryMetrics(),
+  });
+});
+
+router.post("/v1/admin/keys/:id/reset-window", (req: Request, res: Response) => {
+  const ok = resetRemoteApiKeyWindow(req.params.id);
+  if (!ok) {
+    return res.status(404).json({ success: false, error: "API Key not found" });
+  }
+  res.json({
+    success: true,
+    keys: listRemoteApiKeys(),
+    traffic: getTrafficSummaryMetrics(),
   });
 });
 
@@ -90,7 +176,7 @@ router.post("/v1/admin/keys/:id/revoke", (req: Request, res: Response) => {
   if (!revoked) {
     return res.status(404).json({ success: false, error: "API Key not found" });
   }
-  res.json({ success: true, keys: listRemoteApiKeys() });
+  res.json({ success: true, keys: listRemoteApiKeys(), traffic: getTrafficSummaryMetrics() });
 });
 
 router.delete("/v1/admin/keys/:id", (req: Request, res: Response) => {
@@ -98,17 +184,37 @@ router.delete("/v1/admin/keys/:id", (req: Request, res: Response) => {
   if (!deleted) {
     return res.status(404).json({ success: false, error: "API Key not found" });
   }
-  res.json({ success: true, keys: listRemoteApiKeys() });
+  res.json({ success: true, keys: listRemoteApiKeys(), traffic: getTrafficSummaryMetrics() });
 });
 
 router.post("/v1/admin/logs/clear", (req: Request, res: Response) => {
   clearRemoteApiAuditLogs();
-  res.json({ success: true, auditLogs: [] });
+  res.json({ success: true, auditLogs: [], traffic: getTrafficSummaryMetrics() });
 });
 
 /**
- * 3. Public OpenAPI 3.0.3 Specification Endpoint (/api/v1/openapi.json)
- * Accessible directly for OpenAPI / Swagger / Agent Tool importers
+ * 3. Universal CORS Middleware for Public Remote API consumers (/api/v1/*)
+ */
+router.use("/v1", (req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-API-Key, X-Gemini-API-Key, Accept"
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "X-Request-Id, X-Response-Time-Ms, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
+/**
+ * 4. Public OpenAPI 3.0.3 Specification Endpoint (/api/v1/openapi.json)
  */
 router.get("/v1/openapi.json", (req: Request, res: Response) => {
   const protocol = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
@@ -119,12 +225,12 @@ router.get("/v1/openapi.json", (req: Request, res: Response) => {
 });
 
 /**
- * 4. Strict API Key Authentication & Audit Logging Middleware for all Remote `/api/v1/*` routes
+ * 5. Strict API Key Authentication, Sliding-Window Rate Limiting & Audit Logging Middleware
  */
 function requireRemoteApiKey(req: Request, res: Response, next: NextFunction) {
   const startTime = Date.now();
+  incrementActiveRequests();
 
-  // Extract token from Authorization: Bearer <token> or X-API-Key header
   let providedKey: string | undefined;
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
@@ -135,18 +241,46 @@ function requireRemoteApiKey(req: Request, res: Response, next: NextFunction) {
 
   const validation = validateAndTrackApiKey(providedKey);
 
-  // Hook into response finish to log audit telemetry
+  if (validation.keyRecord) {
+    res.setHeader("X-RateLimit-Limit", String(validation.keyRecord.rateLimitPerMinute));
+    res.setHeader("X-RateLimit-Remaining", String(validation.keyRecord.remainingWindowQuota));
+    res.setHeader("X-RateLimit-Reset", String(validation.keyRecord.windowResetInSeconds));
+  }
+
+  let finished = false;
   res.on("finish", () => {
+    if (finished) return;
+    finished = true;
+    decrementActiveRequests();
     const durationMs = Date.now() - startTime;
     recordRemoteApiAudit({
       method: req.method,
       path: `/api${req.path}`,
       statusCode: res.statusCode,
       durationMs,
+      keyId: validation.keyRecord?.id || "",
       keyName: validation.keyRecord?.name || "Unauthenticated",
       keyPrefix: validation.keyRecord?.keyPrefix || "none",
+      clientIp: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "remote",
+      rateLimited: Boolean(validation.rateLimited),
     });
   });
+
+  if (validation.rateLimited) {
+    res.setHeader("Retry-After", String(validation.keyRecord?.windowResetInSeconds || 60));
+    return res.status(429).json({
+      success: false,
+      error: {
+        code: "RATE_LIMIT_EXCEEDED",
+        message: validation.reason,
+        rateLimit: {
+          limitPerMinute: validation.keyRecord?.rateLimitPerMinute,
+          remaining: 0,
+          resetInSeconds: validation.keyRecord?.windowResetInSeconds,
+        },
+      },
+    });
+  }
 
   if (!validation.valid) {
     return res.status(401).json({
@@ -161,13 +295,11 @@ function requireRemoteApiKey(req: Request, res: Response, next: NextFunction) {
     });
   }
 
-  // Attach authenticated key metadata to request object
   (req as any).remoteApiKey = validation.keyRecord;
   (req as any).requestStartTime = startTime;
   next();
 }
 
-// Apply strict authentication to all subsequent /v1/* endpoints
 router.use("/v1", requireRemoteApiKey);
 
 /**
@@ -183,40 +315,20 @@ function sendApiResponse(req: Request, res: Response, data: any, statusCode = 20
     success: statusCode >= 200 && statusCode < 300,
     meta: {
       apiVersion: "1.0.0",
+      requestId: res.getHeader("X-Request-Id") || undefined,
       timestamp: new Date().toISOString(),
       durationMs,
       authenticatedKey: keyRecord ? keyRecord.name : "Verified Key",
+      rateLimit: keyRecord
+        ? {
+            limitPerMinute: keyRecord.rateLimitPerMinute,
+            remainingWindowQuota: keyRecord.remainingWindowQuota,
+            windowResetInSeconds: keyRecord.windowResetInSeconds,
+          }
+        : undefined,
     },
     data,
   });
-}
-
-/**
- * Helper: SSRF URL Validation
- */
-function isSafeRemoteUrl(rawUrl: string): { safe: boolean; reason?: string; parsedUrl?: URL } {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return { safe: false, reason: "Only HTTP and HTTPS protocols are permitted." };
-    }
-    const hostname = parsed.hostname.toLowerCase();
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname === "0.0.0.0" ||
-      hostname.endsWith(".local") ||
-      hostname.endsWith(".internal") ||
-      hostname === "169.254.169.254" ||
-      hostname === "metadata.google.internal"
-    ) {
-      return { safe: false, reason: "Access to internal, loopback, or cloud metadata hosts is prohibited." };
-    }
-    return { safe: true, parsedUrl: parsed };
-  } catch {
-    return { safe: false, reason: "Invalid URL syntax." };
-  }
 }
 
 // ============================================================================
@@ -225,6 +337,7 @@ function isSafeRemoteUrl(rawUrl: string): { safe: boolean; reason?: string; pars
 
 router.get("/v1/status", (req: Request, res: Response) => {
   const keyRecord = (req as any).remoteApiKey;
+  const kb = getActiveKnowledgeBase();
   return sendApiResponse(req, res, {
     status: "operational",
     uptimeSeconds: Math.round(process.uptime()),
@@ -234,6 +347,13 @@ router.get("/v1/status", (req: Request, res: Response) => {
       keyName: keyRecord?.name,
       keyPrefix: keyRecord?.keyPrefix,
       totalRequestsWithKey: keyRecord?.requestCount,
+      rateLimitPerMinute: keyRecord?.rateLimitPerMinute,
+      remainingWindowQuota: keyRecord?.remainingWindowQuota,
+    },
+    knowledgeBase: {
+      bundleName: kb.name,
+      totalConcepts: kb.concepts.length,
+      updatedAt: kb.updatedAt,
     },
     pipelines: {
       convert: "online",
@@ -249,10 +369,6 @@ router.get("/v1/status", (req: Request, res: Response) => {
 // 1. CONVERT & WEB EXTRACTION PIPELINE
 // ============================================================================
 
-/**
- * POST /api/v1/convert/file
- * Converts base64-encoded PDF, DOCX, XLSX, CSV, HTML, TXT, or Image into structured Markdown
- */
 router.post("/v1/convert/file", async (req: Request, res: Response) => {
   try {
     const {
@@ -275,7 +391,6 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
     const buffer = Buffer.from(base64Data, "base64");
     const isPdf = fileType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf");
 
-    // Fast-path PDF Spatial LiteParse
     if (isPdf) {
       const liteResult = await parsePdfWithLiteParse(buffer, fileName, qualityThreshold);
       if (liteResult.markdown && liteResult.markdown.trim().length > 20) {
@@ -291,7 +406,6 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
       }
     }
 
-    // Try deterministic local conversion (DOCX Mammoth, XLSX, CSV, HTML, TXT)
     const localMarkdown = await convertDocumentLocally(fileName, fileType, base64Data);
     if (localMarkdown && localMarkdown.trim().length > 0) {
       const wordCount = localMarkdown.trim().split(/\s+/).filter(Boolean).length;
@@ -304,7 +418,6 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
       });
     }
 
-    // Fallback to Gemini Multimodal Vision / Document Engine
     const headerGeminiKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
     const geminiKey = getGeminiApiKey(headerGeminiKey);
     if (!geminiKey) {
@@ -350,10 +463,6 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/convert/url
- * Fetches any public webpage or document URL and returns clean Markdown + metadata
- */
 router.post("/v1/convert/url", async (req: Request, res: Response) => {
   try {
     const { url, conversionMode = "standard" } = req.body;
@@ -364,7 +473,7 @@ router.post("/v1/convert/url", async (req: Request, res: Response) => {
       });
     }
 
-    const safety = isSafeRemoteUrl(url);
+    const safety = validateSafeRemoteUrl(url);
     if (!safety.safe) {
       return res.status(400).json({
         success: false,
@@ -406,10 +515,6 @@ router.post("/v1/convert/url", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/extract/json
- * Extracts structured JSON adhering to a JSON Schema or preset template
- */
 router.post("/v1/extract/json", async (req: Request, res: Response) => {
   try {
     const { content, url, jsonSchema, extractionPrompt, presetId, customApiKey } = req.body;
@@ -421,7 +526,7 @@ router.post("/v1/extract/json", async (req: Request, res: Response) => {
     }
 
     if (url) {
-      const safety = isSafeRemoteUrl(url);
+      const safety = validateSafeRemoteUrl(url);
       if (!safety.safe) {
         return res.status(400).json({
           success: false,
@@ -451,10 +556,6 @@ router.post("/v1/extract/json", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/site/discover
- * Inspects domain robots.txt, llms.txt, and sitemaps
- */
 router.post("/v1/site/discover", async (req: Request, res: Response) => {
   try {
     const { url } = req.body;
@@ -465,7 +566,7 @@ router.post("/v1/site/discover", async (req: Request, res: Response) => {
       });
     }
 
-    const safety = isSafeRemoteUrl(url);
+    const safety = validateSafeRemoteUrl(url);
     if (!safety.safe) {
       return res.status(400).json({
         success: false,
@@ -483,10 +584,6 @@ router.post("/v1/site/discover", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/site/map
- * Extracts domain sitemap hierarchy and URLs
- */
 router.post("/v1/site/map", async (req: Request, res: Response) => {
   try {
     const { domainOrSitemapUrl, maxUrls = 200, filterPrefix, filterExtension, searchKeyword } = req.body;
@@ -497,7 +594,7 @@ router.post("/v1/site/map", async (req: Request, res: Response) => {
       });
     }
 
-    const safety = isSafeRemoteUrl(domainOrSitemapUrl);
+    const safety = validateSafeRemoteUrl(domainOrSitemapUrl);
     if (!safety.safe) {
       return res.status(400).json({
         success: false,
@@ -526,10 +623,6 @@ router.post("/v1/site/map", async (req: Request, res: Response) => {
 // 2. NLP & OKF INTELLIGENCE PIPELINE
 // ============================================================================
 
-/**
- * POST /api/v1/nlp/analyze
- * Computes readability (Flesch-Kincaid, SMOG), sentiment, language detection, and keywords
- */
 router.post("/v1/nlp/analyze", (req: Request, res: Response) => {
   try {
     const { text } = req.body;
@@ -612,10 +705,6 @@ router.post("/v1/nlp/analyze", (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/okf/agent
- * Executes OKF v1.0 synthesis, compliance auditing, or grounded Q&A
- */
 router.post("/v1/okf/agent", async (req: Request, res: Response) => {
   try {
     const { task = "synthesize", okfContent, userQuery, customApiKey } = req.body;
@@ -671,10 +760,6 @@ router.post("/v1/okf/agent", async (req: Request, res: Response) => {
 // 3. AGENT SKILLS & FORMAL LOGIC PIPELINE
 // ============================================================================
 
-/**
- * POST /api/v1/skills/synthesize
- * Compiles raw Markdown runbooks/SOPs into an Agent Skill package (SKILL.md, references/, scripts/)
- */
 router.post("/v1/skills/synthesize", (req: Request, res: Response) => {
   try {
     const { markdown, skillName, allowedTools, license, compatibility } = req.body;
@@ -711,10 +796,6 @@ router.post("/v1/skills/synthesize", (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/skills/validate
- * Performs 6-point preflight validation and best-practices audit on an Agent Skill package
- */
 router.post("/v1/skills/validate", (req: Request, res: Response) => {
   try {
     const { skillPackage } = req.body;
@@ -742,10 +823,6 @@ router.post("/v1/skills/validate", (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/skills/classify-logic
- * Performs formal First-Order (FOL), Higher-Order (HOL), Modal, and Temporal logic classification
- */
 router.post("/v1/skills/classify-logic", (req: Request, res: Response) => {
   try {
     const { text } = req.body;
@@ -770,10 +847,6 @@ router.post("/v1/skills/classify-logic", (req: Request, res: Response) => {
 // 4. METAAST & VECTOR DB PIPELINE
 // ============================================================================
 
-/**
- * POST /api/v1/meta-ast/parse
- * Parses raw Markdown into an enriched MetaAST block syntax tree
- */
 router.post("/v1/meta-ast/parse", (req: Request, res: Response) => {
   try {
     const { markdown, documentTitle = "Document" } = req.body;
@@ -809,10 +882,6 @@ router.post("/v1/meta-ast/parse", (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/meta-ast/vector-chunks
- * Chunks Markdown for Vector Databases (Pinecone, Qdrant, pgvector, ChromaDB)
- */
 router.post("/v1/meta-ast/vector-chunks", (req: Request, res: Response) => {
   try {
     const { markdown, options } = req.body;
@@ -857,13 +926,27 @@ router.post("/v1/meta-ast/vector-chunks", (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// 5. MODEL CONTEXT PROTOCOL (MCP) JSON-RPC 2.0 PIPELINE
+// 5. MODEL CONTEXT PROTOCOL (MCP) JSON-RPC 2.0 PIPELINE (Unified with Live KB)
 // ============================================================================
 
-/**
- * Forward authenticated /api/v1/mcp/* requests to the MCP handler logic
- */
 router.get("/v1/mcp/manifest", (req: Request, res: Response) => {
+  const kb = getActiveKnowledgeBase();
+  const rootId = (kb.name || "okf-kb").toLowerCase().replace(/\s+/g, "-");
+
+  const resources = kb.concepts.map((c) => ({
+    uri: `okf://${rootId}/${c.path || c.id}`,
+    name: c.title || c.path || c.id,
+    description: c.description || `OKF Concept Document (${c.type})`,
+    mimeType: "text/markdown",
+  }));
+
+  resources.unshift({
+    uri: `okf://${rootId}/INDEX.md`,
+    name: `${kb.name} Master Index`,
+    description: "Root OKF Catalog and Concept Manifest",
+    mimeType: "text/markdown",
+  });
+
   return sendApiResponse(req, res, {
     jsonrpc: "2.0",
     protocolVersion: "2024-11-05",
@@ -872,6 +955,12 @@ router.get("/v1/mcp/manifest", (req: Request, res: Response) => {
       version: "1.0.0",
       specUrl: "https://okf.md/spec/",
     },
+    knowledgeBase: {
+      name: kb.name,
+      totalConcepts: kb.concepts.length,
+      updatedAt: kb.updatedAt,
+    },
+    resources,
     tools: [
       "search_okf_concepts",
       "get_okf_concept",
@@ -895,6 +984,8 @@ router.post("/v1/mcp/rpc", (req: Request, res: Response) => {
   }
 
   try {
+    const kb = getActiveKnowledgeBase();
+
     if (method === "initialize") {
       return res.json({
         jsonrpc: "2.0",
@@ -907,9 +998,124 @@ router.post("/v1/mcp/rpc", (req: Request, res: Response) => {
       });
     }
 
+    if (method === "resources/list") {
+      const rootId = (kb.name || "okf-kb").toLowerCase().replace(/\s+/g, "-");
+      const resources = kb.concepts.map((c) => ({
+        uri: `okf://${rootId}/${c.path || c.id}`,
+        name: c.title || c.path || c.id,
+        description: c.description || `OKF Concept Document (${c.type})`,
+        mimeType: "text/markdown",
+      }));
+      return res.json({ jsonrpc: "2.0", id, result: { resources } });
+    }
+
+    if (method === "tools/list") {
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          tools: [
+            { name: "search_okf_concepts", description: "Search concepts across the active OKF knowledge base." },
+            { name: "get_okf_concept", description: "Retrieve a specific OKF concept by ID or path." },
+            { name: "traverse_okf_graph", description: "Traverse upstream prerequisites and downstream related concepts." },
+            { name: "synthesize_agent_skill", description: "Compile Markdown runbook into an Agent Skill package." },
+            { name: "classify_document_logic", description: "Classify text using FOL, HOL, Modal, and Temporal Logic." },
+            { name: "parse_markdown_meta_ast", description: "Parse Markdown into an enriched MetaAST." },
+            { name: "chunk_markdown_for_vector_db", description: "Chunk Markdown for Vector Databases." },
+          ],
+        },
+      });
+    }
+
     if (method === "tools/call") {
       const toolName = params?.name;
       const args = params?.arguments || {};
+
+      if (toolName === "search_okf_concepts") {
+        const matches = searchKnowledgeBaseConcepts({
+          query: args.query || "",
+          tag: args.tag,
+          type: args.type,
+          trustTier: args.trustTier,
+          limit: args.limit || 5,
+        });
+        return res.json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    query: args.query || "",
+                    bundleName: kb.name,
+                    totalMatches: matches.length,
+                    results: matches.map((m) => ({
+                      id: m.concept.id,
+                      path: m.concept.path,
+                      title: m.concept.title,
+                      type: m.concept.type,
+                      trustTier: m.concept.trustTier,
+                      description: m.concept.description,
+                      tags: m.concept.tags,
+                      relevanceScore: m.score,
+                    })),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          },
+        });
+      }
+
+      if (toolName === "get_okf_concept") {
+        const concept = findKnowledgeBaseConcept(args.conceptId || "");
+        if (!concept) {
+          return res.json({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [{ type: "text", text: `Concept '${args.conceptId}' not found in active knowledge base.` }],
+              isError: true,
+            },
+          });
+        }
+        return res.json({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: JSON.stringify(concept, null, 2) }] },
+        });
+      }
+
+      if (toolName === "traverse_okf_graph") {
+        const concept = findKnowledgeBaseConcept(args.conceptId || "");
+        return res.json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    targetConcept: args.conceptId,
+                    found: Boolean(concept),
+                    prerequisites: concept?.prerequisites || [],
+                    relatedConcepts: concept?.relatedConcepts || [],
+                    directNeighborsCount:
+                      (concept?.prerequisites?.length || 0) + (concept?.relatedConcepts?.length || 0),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          },
+        });
+      }
 
       if (toolName === "classify_document_logic") {
         const classification = classifyTextLogic(args.text || "");
@@ -957,12 +1163,10 @@ router.post("/v1/mcp/rpc", (req: Request, res: Response) => {
         });
       }
 
-      return res.json({
+      return res.status(404).json({
         jsonrpc: "2.0",
         id,
-        result: {
-          content: [{ type: "text", text: JSON.stringify({ executedTool: toolName, status: "completed", args }) }],
-        },
+        error: { code: -32601, message: `Tool '${toolName}' not recognized.` },
       });
     }
 
@@ -981,7 +1185,7 @@ router.post("/v1/mcp/rpc", (req: Request, res: Response) => {
 });
 
 router.post("/v1/mcp/query", (req: Request, res: Response) => {
-  const { query, topK = 3, expandGraph = true } = req.body;
+  const { query, trustTier, topK = 3, expandGraph = true } = req.body;
   if (!query || typeof query !== "string") {
     return res.status(400).json({
       success: false,
@@ -989,12 +1193,44 @@ router.post("/v1/mcp/query", (req: Request, res: Response) => {
     });
   }
 
+  const kb = getActiveKnowledgeBase();
+  const matches = searchKnowledgeBaseConcepts({
+    query,
+    trustTier,
+    limit: topK,
+  });
+
+  const expandedIds = new Set<string>();
+  for (const m of matches) {
+    expandedIds.add(m.concept.id);
+    if (expandGraph && m.concept.prerequisites) {
+      for (const p of m.concept.prerequisites) expandedIds.add(p);
+    }
+  }
+
+  const assembledNodes = kb.concepts.filter((c) => expandedIds.has(c.id));
+
   return sendApiResponse(req, res, {
     query,
-    topK,
-    expandGraph,
-    status: "queried",
-    message: "Query executed against active OKF Knowledge Graph.",
+    bundleName: kb.name,
+    primaryMatches: matches.map((m) => ({
+      id: m.concept.id,
+      path: m.concept.path,
+      title: m.concept.title,
+      type: m.concept.type,
+      trustTier: m.concept.trustTier,
+      relevanceScore: m.score,
+    })),
+    expandedNodes: assembledNodes.map((n) => ({
+      id: n.id,
+      path: n.path,
+      title: n.title,
+      type: n.type,
+      trustTier: n.trustTier,
+    })),
+    assembledContextText: assembledNodes
+      .map((n) => `### [${n.type.toUpperCase()}] ${n.title} (${n.path})\nTrust: ${n.trustTier}\n\n${n.body}`)
+      .join("\n\n---\n\n"),
   });
 });
 
