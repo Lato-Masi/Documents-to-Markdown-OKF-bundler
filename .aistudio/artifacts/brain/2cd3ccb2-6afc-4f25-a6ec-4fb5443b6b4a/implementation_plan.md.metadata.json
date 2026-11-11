@@ -1,6 +1,0 @@
-{
-  "summary":  "Remediation plan to eliminate OCR icon noise and broken image tags, implement 2D spatial column/line/quote/chart reconstruction from bounding boxes, and add resilient multi-model fallback across Gemini 4 Argon, Gemini 3.8 Flash, Gemini 2.5 Pro, and Gemini 2.5 Flash.",
-  "updatedAt":  "2026-11-11T01:09:40.711882902Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

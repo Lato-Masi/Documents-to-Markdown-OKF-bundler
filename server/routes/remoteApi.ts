@@ -36,6 +36,7 @@ import {
   generateContentWithRetry,
   resolveVisionModel,
   getVisionModelDisplayName,
+  resolvePdfThinkingLevel,
   buildComplexPdfSemanticPrompt,
 } from "../utils/geminiService";
 import { convertDocumentLocally } from "../utils/localConverter";
@@ -428,6 +429,7 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
 
       if (geminiKey) {
         const ai = createGeminiClient(geminiKey);
+        const pdfThinkingLevel = resolvePdfThinkingLevel(selectedVisionModel, conversionMode);
         const pdfPrompt = buildComplexPdfSemanticPrompt({
           fileName,
           totalPages: liteResult.totalPages,
@@ -441,7 +443,6 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
               : "Standard faithful document conversion preserving full structural and semantic accuracy.",
           styleInstructions: "Format as GitHub Flavored Markdown (GFM) with aligned tables and attributed blockquotes.",
           structuredMarkdown: liteResult.markdown,
-          pdfTextReference: liteResult.rawText,
         });
 
         const response = await generateContentWithRetry(ai, {
@@ -455,6 +456,11 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
             },
             { text: pdfPrompt },
           ],
+          config: {
+            thinkingConfig: {
+              thinkingLevel: pdfThinkingLevel,
+            },
+          },
         });
 
         const markdown = (response.text || liteResult.markdown || "").trim();

@@ -19,6 +19,21 @@ export {
   generateStandaloneOKFVisualizerHTML,
 } from "../lib/okfMultiFormatExporter";
 
+export {
+  buildOKFv02JsonBundle,
+  serializeOKFv02JsonBundle,
+  downloadOKFv02JsonBundle,
+  loadDocumentAnnotations,
+  saveDocumentAnnotations,
+  type OKFv02JsonBundle,
+  type OKFDocumentAnnotation,
+  type OKFAnnotationKind,
+  type IdentifiedBundleEntity,
+  type OKFHierarchyNode,
+  type OKFExtractedLink,
+  type BuildOKFJsonBundleOptions,
+} from "../lib/okfJsonBundleExporter";
+
 import {
   compileOKFBundle,
   partitionMarkdownToOKFConcepts,

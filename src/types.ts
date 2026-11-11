@@ -16,6 +16,7 @@ export type ViewMode = "single" | "multi_doc" | "batch_zip";
 export type SourceType = "file" | "url";
 export type TabType = "preview" | "raw" | "ast" | "okf" | "skills" | "spatial" | "stats";
 export type ConversionPhase = "idle" | "converting" | "converted" | "analyzing" | "analyzed";
+export type RefinementStage = "idle" | "draft_ready" | "refining_stream" | "completed";
 export type AnalysisStatus = "idle" | "analyzing" | "completed" | "error";
 
 export interface SpatialWord {
@@ -35,6 +36,10 @@ export interface SpatialTextItem {
   fontName?: string;
   fontSize?: number;
   rotation?: number;
+  confidence?: number;
+  ocrConfidence?: number;
+  fontIsBuggy?: boolean;
+  confidenceReasons?: string[];
   words?: SpatialWord[];
 }
 
@@ -80,6 +85,8 @@ export interface SpatialDocumentResult {
   rawText: string;
   quality: SpatialQualityMetrics;
   executionTimeMs: number;
+  documentHash?: string;
+  cacheHit?: boolean;
   error?: string;
 }
 

@@ -176,7 +176,16 @@ export function partitionMarkdownToOKFConcepts(
 
   const sourceName = options.sourceFileName || "converted-document.md";
   const defaultStatus: OkfStatus = options.defaultStatus || "stable";
-  const actor = options.actorName || "okf-nlp-agent";
+  const rawActor = options.actorName || "process:okf-nlp-agent";
+  const actor =
+    /^(?:human|process):\S+$/.test(rawActor) || /^[^/\s]+\/[^/\s]+$/.test(rawActor)
+      ? rawActor
+      : `process:${rawActor.replace(/\s+/g, "-")}`;
+  const rawVerifier = options.verifiedBy
+    ? /^(?:human|process):\S+$/.test(options.verifiedBy) || /^[^/\s]+\/[^/\s]+$/.test(options.verifiedBy)
+      ? options.verifiedBy
+      : `human:${options.verifiedBy.replace(/\s+/g, "-")}`
+    : undefined;
   const isoNow = new Date().toISOString();
   const todayStr = isoNow.split("T")[0];
   const enableNlp = options.enableNlpEnrichment !== false;
@@ -293,9 +302,9 @@ export function partitionMarkdownToOKFConcepts(
         by: actor,
         at: isoNow,
       },
-      verified: options.verifiedBy
+      verified: rawVerifier
         ? {
-            by: options.verifiedBy,
+            by: rawVerifier,
             at: isoNow,
           }
         : [],
@@ -368,9 +377,9 @@ export function partitionMarkdownToOKFConcepts(
         by: actor,
         at: isoNow,
       },
-      verified: options.verifiedBy
+      verified: rawVerifier
         ? {
-            by: options.verifiedBy,
+            by: rawVerifier,
             at: isoNow,
           }
         : [],
@@ -515,9 +524,11 @@ export function compileOKFBundle(
       .map((c) => `- **[${c.metadata.title || c.path}](${c.path})** (\`${c.metadata.type || "concept"}\` • \`${deriveTrustTier(c)}\` • \`${getStatus(c.metadata)}\`) — ${c.metadata.description || "No description."}`)
       .join("\n");
 
+  const todayIsoDate = new Date().toISOString().slice(0, 10);
+
   const reservedIndex = {
     kind: "index" as const,
-    path: "INDEX.md",
+    path: "index.md",
     body: indexMarkdown,
     metadata: {
       title: `${bundleRootName} Index`,
@@ -527,12 +538,8 @@ export function compileOKFBundle(
 
   const reservedLog = {
     kind: "log" as const,
-    path: "logs/CONVERSION.md",
-    body: `# Conversion Execution Log (OKF v0.2)\n\n- Timestamp: ${new Date().toISOString()}\n- Engine: okf-ts v0.2.0 Toolkit + OKF Trust Signals & Semantic Knowledge Graph Engine\n- Total Parsed Concepts: ${concepts.length}\n- Average Content Completeness: ${avgCompletenessScore}%\n- Trust Breakdown: ${trustTiers["human-reviewed"]} Human-Reviewed, ${trustTiers["machine-confirmed"]} Machine-Confirmed, ${trustTiers["unverified"]} Unverified\n- Freshness: ${freshCount} Active / Fresh, ${staleCount} Stale\n- Validation Findings: ${issues.length} issue(s) recorded.\n`,
-    metadata: {
-      title: "Conversion Execution Log",
-      type: "log",
-    },
+    path: "logs/log.md",
+    body: `# Conversion Execution Log (OKF v0.2)\n\n## ${todayIsoDate}\n\n- Timestamp: ${new Date().toISOString()}\n- Engine: okf-ts v0.2.0 Toolkit + OKF Trust Signals & Semantic Knowledge Graph Engine\n- Total Parsed Concepts: ${concepts.length}\n- Average Content Completeness: ${avgCompletenessScore}%\n- Trust Breakdown: ${trustTiers["human-reviewed"]} Human-Reviewed, ${trustTiers["machine-confirmed"]} Machine-Confirmed, ${trustTiers["unverified"]} Unverified\n- Freshness: ${freshCount} Active / Fresh, ${staleCount} Stale\n- Validation Findings: ${issues.length} issue(s) recorded.\n`,
   };
 
   const bundle: OkfBundle = {

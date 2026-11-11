@@ -16,6 +16,8 @@ import {
   Columns,
   BarChart3,
   Quote,
+  FileJson,
+  Flame,
 } from "lucide-react";
 import MarkdownEditor from "./MarkdownEditor";
 import RenderedMarkdownPreview from "./RenderedMarkdownPreview";
@@ -26,9 +28,24 @@ import AgentSkillExplorer from "./AgentSkillExplorer";
 import DocumentInsights from "./DocumentInsights";
 import SpatialLayoutInspector from "./SpatialLayoutInspector";
 import ErrorBoundary from "./ErrorBoundary";
-import { ConversionMode, TargetStyle, VisionModelType, TabType, SpatialDocumentResult } from "../types";
+import {
+  ConversionMode,
+  TargetStyle,
+  VisionModelType,
+  TabType,
+  SpatialDocumentResult,
+  RefinementStage,
+} from "../types";
 import { formatBytes } from "../utils/fileHelpers";
-import { convertMultipleMarkdownsToOKFBundle, exportOKFBundleAsZip, downloadZipBlob } from "../utils/okfZipExporter";
+import {
+  convertMultipleMarkdownsToOKFBundle,
+  exportOKFBundleAsZip,
+  downloadZipBlob,
+  buildOKFv02JsonBundle,
+  downloadOKFv02JsonBundle,
+  loadDocumentAnnotations,
+} from "../utils/okfZipExporter";
+import { summarizeDocumentConfidence } from "../utils/pdfConfidenceScorer";
 
 interface SingleDocumentViewProps {
   file: File | null;
@@ -65,6 +82,10 @@ interface SingleDocumentViewProps {
   onRefreshSpatialInspection?: (threshold: number) => void;
   qualityThreshold?: number;
   setQualityThreshold?: (val: number) => void;
+  refinementStage?: RefinementStage;
+  conversionElapsedMs?: number | null;
+  onKeepInstantDraft?: () => void;
+  base64Data?: string;
 }
 
 export default function SingleDocumentView({
@@ -102,6 +123,10 @@ export default function SingleDocumentView({
   onRefreshSpatialInspection,
   qualityThreshold = 75,
   setQualityThreshold,
+  refinementStage = "idle",
+  conversionElapsedMs = null,
+  onKeepInstantDraft,
+  base64Data,
 }: SingleDocumentViewProps) {
   const [hasRunAnalysis, setHasRunAnalysis] = React.useState(false);
   const [isAnalyzing, setIsAnalyzing] = React.useState(false);
@@ -135,11 +160,44 @@ export default function SingleDocumentView({
     }
   };
 
+  const handleExportOKFJsonBundle = () => {
+    if (!convertedMarkdown) return;
+    try {
+      const sourceFileName = file ? file.name : "document.md";
+      const baseName = sourceFileName.replace(/\.[^/.]+$/, "") || "document";
+      const storedAnnotations = loadDocumentAnnotations(sourceFileName);
+      const jsonBundle = buildOKFv02JsonBundle(convertedMarkdown, {
+        sourceFileName,
+        bundleName: `${baseName}-okf-bundle`,
+        annotations: storedAnnotations,
+        includeAutomatedAnnotations: true,
+        includeRawMarkdown: true,
+      });
+      downloadOKFv02JsonBundle(jsonBundle, `${baseName}.okf.json`);
+    } catch (err) {
+      console.error("Failed to export OKF v0.2 JSON bundle:", err);
+    }
+  };
+
   const wordCount = useMemo(() => {
     if (!convertedMarkdown) return 0;
     const matches = convertedMarkdown.match(/\S+/g);
     return matches ? matches.length : 0;
   }, [convertedMarkdown]);
+
+  const pdfHeatmapSummary = useMemo(() => {
+    if (!spatialData?.pages || spatialData.pages.length === 0) return null;
+    return summarizeDocumentConfidence(spatialData.pages, {
+      convertedMarkdown,
+      lowConfidenceThreshold: 65,
+    });
+  }, [spatialData?.pages, convertedMarkdown]);
+
+  const handleReconvertWithVision = () => {
+    setConversionMode("rich");
+    handleConvert();
+  };
+
   return (
     <div className="space-y-6">
       {/* Hidden native file input */}
@@ -240,17 +298,17 @@ export default function SingleDocumentView({
               <button
                 onClick={handleConvert}
                 disabled={isLoading}
-                className="flex-1 sm:flex-initial px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50"
+                className="flex-1 sm:flex-initial px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50 whitespace-nowrap shrink-0"
               >
                 {isLoading ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin text-emerald-300 shrink-0" />
-                    <span>Converting...</span>
+                    <span>{refinementStage === "draft_ready" || refinementStage === "refining_stream" ? "Refining..." : "Converting..."}</span>
                   </>
                 ) : (
                   <>
                     <Play className="w-3.5 h-3.5 fill-current shrink-0" />
-                    <span>Convert Document</span>
+                    <span>{refinementStage === "draft_ready" ? "Verify & Refine" : "Convert Document"}</span>
                   </>
                 )}
               </button>
@@ -259,40 +317,61 @@ export default function SingleDocumentView({
 
           {/* Spatial Layout Complexity Pre-Flight Banner for PDFs */}
           {spatialData && spatialData.quality && (
-            <div className="px-4 py-3 rounded-xl bg-zinc-900/90 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
-                  <Columns className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>PDF Layout Pre-Flight:</span>
+            <div className="px-4 py-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
+              <div className="flex items-center gap-2 flex-wrap text-zinc-300">
+                <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                  <Columns className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>PDF Pre-Flight</span>
                 </span>
-                <span className="px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-200 font-mono text-[11px] border border-zinc-700">
-                  {spatialData.totalPages} {spatialData.totalPages === 1 ? "Page" : "Pages"} • {spatialData.quality.detectedColumns}-Column Grid
+                <span className="text-zinc-600">·</span>
+                <span className="font-mono tabular-nums text-[11px] text-zinc-300">
+                  {spatialData.totalPages} {spatialData.totalPages === 1 ? "page" : "pages"} · {spatialData.quality.detectedColumns}-col grid · {spatialData.executionTimeMs}ms{spatialData.cacheHit ? " (SHA-256 cache)" : ""}
                 </span>
                 {spatialData.quality.hasEmbeddedCharts && (
-                  <span className="px-2 py-0.5 rounded-md bg-amber-950/80 text-amber-300 border border-amber-800/70 text-[11px] flex items-center gap-1">
-                    <BarChart3 className="w-3 h-3 text-amber-400" />
-                    <span>Embedded Charts → GFM Tables</span>
-                  </span>
+                  <>
+                    <span className="text-zinc-600">·</span>
+                    <span className="text-amber-300 text-[11px] inline-flex items-center gap-1">
+                      <BarChart3 className="w-3 h-3 text-amber-400 shrink-0" />
+                      <span>Charts → GFM Tables</span>
+                    </span>
+                  </>
                 )}
                 {spatialData.quality.hasComplexSemantics && (
-                  <span className="px-2 py-0.5 rounded-md bg-purple-950/80 text-purple-300 border border-purple-800/70 text-[11px] flex items-center gap-1">
-                    <Quote className="w-3 h-3 text-purple-400" />
-                    <span>Callouts & Attributed Quotes</span>
-                  </span>
+                  <>
+                    <span className="text-zinc-600">·</span>
+                    <span className="text-indigo-300 text-[11px] inline-flex items-center gap-1">
+                      <Quote className="w-3 h-3 text-indigo-400 shrink-0" />
+                      <span>Callouts & Quotes</span>
+                    </span>
+                  </>
                 )}
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
-                <span
-                  className={`px-2.5 py-0.5 rounded-md font-mono text-[11px] font-semibold border ${
-                    spatialData.quality.requiresMultimodalVision || conversionMode === "rich"
-                      ? "bg-emerald-950/80 text-emerald-300 border-emerald-700/70"
-                      : "bg-zinc-800 text-zinc-300 border-zinc-700"
-                  }`}
-                >
+              <div className="flex items-center gap-2.5 flex-wrap shrink-0">
+                {pdfHeatmapSummary && pdfHeatmapSummary.totalSegments > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("spatial")}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono tabular-nums font-semibold inline-flex items-center gap-1.5 border transition whitespace-nowrap shrink-0 cursor-pointer ${
+                      pdfHeatmapSummary.lowConfidenceCount > 0
+                        ? "bg-rose-950/70 hover:bg-rose-900/70 border-rose-800 text-rose-300"
+                        : "bg-zinc-950 hover:bg-zinc-800 border-zinc-800 text-emerald-400"
+                    }`}
+                    title="Open PDF Visual Quality Heatmap to inspect segment confidence scores in red"
+                  >
+                    <Flame className="w-3 h-3 shrink-0" />
+                    <span>
+                      {pdfHeatmapSummary.lowConfidenceCount > 0
+                        ? `Quality Heatmap · ${pdfHeatmapSummary.lowConfidenceCount} low`
+                        : "Quality Heatmap"}
+                    </span>
+                  </button>
+                )}
+
+                <span className="font-mono tabular-nums text-[11px] font-medium text-emerald-400">
                   {spatialData.quality.requiresMultimodalVision || conversionMode === "rich"
-                    ? `Multimodal Vision Active (${visionModel === "gemini-4-argon" ? "Gemini 4 Pro" : "Gemini 3.8 Flash"})`
-                    : `Fast Local LiteParse (${spatialData.quality.qualityScore}/100)`}
+                    ? `${visionModel === "gemini-4-argon" ? "Gemini 4 Pro" : "Gemini 3.8 Flash"} (${conversionMode === "rich" || visionModel === "gemini-4-argon" ? "Medium" : "Low"} Thinking)`
+                    : `Local 2D LiteParse (${spatialData.quality.qualityScore}/100)`}
                 </span>
               </div>
             </div>
@@ -382,7 +461,7 @@ export default function SingleDocumentView({
               <span className="w-2 h-2 rounded-full bg-indigo-400 inline-block" />
               <span>AI Escalation Threshold</span>
             </span>
-            <span className="font-mono text-indigo-300 font-semibold">{qualityThreshold}%</span>
+            <span className="font-mono tabular-nums text-indigo-300 font-semibold">{qualityThreshold}%</span>
           </label>
           <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
             {[
@@ -421,28 +500,22 @@ export default function SingleDocumentView({
         </div>
       )}
 
-      {/* Loading Progress Indicator */}
-      {isLoading && (
-        <div className="p-6 bg-zinc-900/90 border border-emerald-500/30 rounded-2xl text-center space-y-4 shadow-xl relative overflow-hidden">
-          <div className="inline-flex p-3 bg-emerald-950/60 rounded-2xl text-emerald-400 border border-emerald-800/50 shadow-inner">
+      {/* Loading Progress Indicator (only shown when no instant spatial draft is rendered yet) */}
+      {isLoading && !convertedMarkdown && (
+        <div className="p-6 bg-zinc-900/90 border border-emerald-500/30 rounded-2xl text-center space-y-4 relative overflow-hidden">
+          <div className="inline-flex p-3 bg-emerald-950/60 rounded-2xl text-emerald-400 border border-emerald-800/50">
             <RefreshCw className="w-6 h-6 animate-spin text-emerald-400" />
           </div>
 
           <div className="space-y-1">
-            <h4 className="text-sm font-semibold text-zinc-100 flex items-center justify-center gap-2">
-              <span>[Phase 1/2] Converting Document to Clean Markdown</span>
-              {convertedMarkdown && (
-                <span className="px-2 py-0.5 rounded-md bg-emerald-950 text-emerald-400 text-[10px] font-mono border border-emerald-800/80">
-                  LIVE STREAMING
-                </span>
-              )}
+            <h4 className="text-sm font-semibold text-zinc-100">
+              Converting Document to Clean Markdown
             </h4>
             <p className="text-xs text-emerald-400 font-mono animate-pulse max-w-md mx-auto">
               {loadingStep || "Initializing conversion engine..."}
             </p>
           </div>
 
-          {/* Animated Progress Accent Line */}
           <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden max-w-xs mx-auto">
             <div className="h-full bg-emerald-500 rounded-full animate-pulse w-3/4 transition-all duration-500"></div>
           </div>
@@ -452,37 +525,93 @@ export default function SingleDocumentView({
       {/* Converted Markdown Output Preview & Tabs */}
       {convertedMarkdown && (
         <div className="space-y-4">
-          {/* Phase 1 Completion & Phase 2 Analysis Banner */}
-          {!isLoading && (
-            <div className="p-3.5 bg-emerald-950/40 border border-emerald-800/60 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs shadow-md">
-              <div className="flex items-center gap-2.5">
-                <div className="p-1.5 bg-emerald-900/60 text-emerald-400 rounded-lg shrink-0 border border-emerald-700/50">
-                  <Check className="w-4 h-4" />
-                </div>
-                <div>
-                  <span className="font-semibold text-emerald-300">Phase 1 Complete:</span>{" "}
-                  <span className="text-zinc-300">
-                    Clean Markdown generated ({wordCount.toLocaleString()} words). Ready to view, edit, or export.
-                  </span>
+          {/* Progressive Two-Stage Refinement / Completion Strip */}
+          {isLoading ? (
+            <div className="px-4 py-3 bg-zinc-900 border border-emerald-700/50 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <RefreshCw className="w-4 h-4 animate-spin text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-zinc-100">
+                      {refinementStage === "draft_ready"
+                        ? "Instant 2D Spatial Draft Ready"
+                        : "Streaming Gemini Visual Refinement"}
+                    </span>
+                    <span className="text-zinc-600">·</span>
+                    <span className="font-mono tabular-nums text-zinc-300">
+                      {wordCount.toLocaleString()} words
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-emerald-400 font-mono truncate mt-0.5">
+                    {loadingStep || "Verifying multi-column reading order, charts, and attributed quotes..."}
+                  </p>
                 </div>
               </div>
-              {!hasRunAnalysis ? (
+              {onKeepInstantDraft && (
                 <button
-                  onClick={() => {
-                    setHasRunAnalysis(true);
-                    setActiveTab("stats");
-                  }}
-                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-medium transition flex items-center gap-1.5 shadow shrink-0"
+                  type="button"
+                  onClick={onKeepInstantDraft}
+                  className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded-lg font-medium transition whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Stop background Gemini refinement and keep the current instant 2D spatial draft"
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Run Phase 2 Analysis</span>
+                  Keep Instant Draft
                 </button>
-              ) : (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-950 border border-indigo-800/80 text-indigo-300 rounded-lg text-xs font-mono">
-                  <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                  <span>Phase 2 Analysis Ready</span>
-                </span>
               )}
+            </div>
+          ) : (
+            <div className="px-4 py-3 bg-zinc-900 border border-zinc-800 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5">
+                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-emerald-400">
+                    {refinementStage === "draft_ready"
+                      ? "Instant 2D Spatial Draft Ready"
+                      : "Phase 1 Complete"}
+                  </span>
+                  <span className="text-zinc-600">·</span>
+                  <span className="text-zinc-300 font-mono tabular-nums">
+                    {wordCount.toLocaleString()} words
+                    {conversionElapsedMs !== null ? ` · ${(conversionElapsedMs / 1000).toFixed(1)}s` : ""}
+                  </span>
+                  {refinementStage === "draft_ready" && (
+                    <>
+                      <span className="text-zinc-600">·</span>
+                      <span className="text-zinc-400">
+                        Local 2D column & chart draft ready for preview or Gemini visual verification
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap shrink-0">
+                {refinementStage === "draft_ready" && (
+                  <button
+                    type="button"
+                    onClick={handleConvert}
+                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium transition flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Play className="w-3 h-3 fill-current shrink-0" />
+                    <span>Verify & Refine with Gemini</span>
+                  </button>
+                )}
+                {!hasRunAnalysis ? (
+                  <button
+                    onClick={() => {
+                      setHasRunAnalysis(true);
+                      setActiveTab("stats");
+                    }}
+                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                    <span>Run Phase 2 Analysis</span>
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-indigo-300 text-xs font-mono whitespace-nowrap shrink-0">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span>Phase 2 Ready</span>
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
@@ -492,7 +621,13 @@ export default function SingleDocumentView({
                 [
                   { id: "preview", label: "Rendered Preview" },
                   { id: "raw", label: "Interactive Editor" },
-                  { id: "spatial", label: "Spatial Layout (LiteParse)" },
+                  {
+                    id: "spatial",
+                    label:
+                      pdfHeatmapSummary && pdfHeatmapSummary.lowConfidenceCount > 0
+                        ? `PDF Quality Heatmap (${pdfHeatmapSummary.lowConfidenceCount} low)`
+                        : "PDF Quality Heatmap",
+                  },
                   { id: "ast", label: "AST Explorer" },
                   { id: "okf", label: "OKF Knowledge Blocks" },
                   { id: "skills", label: "Agent Skill (SKILL.md)" },
@@ -519,17 +654,21 @@ export default function SingleDocumentView({
             </div>
 
             <div className="flex items-center justify-end gap-2 w-full sm:w-auto">
-              {isLoading ? (
-                <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 rounded-lg text-xs font-mono animate-pulse">
-                  <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
-                  <span>Streaming Output...</span>
-                </span>
-              ) : (
-                <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 bg-zinc-950 border border-emerald-900/60 text-emerald-400 rounded-lg text-xs font-mono">
-                  <Check className="w-3 h-3 text-emerald-400 shrink-0" />
-                  <span>Phase 1 Done ({wordCount.toLocaleString()} words)</span>
-                </span>
-              )}
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-zinc-400 text-xs font-mono tabular-nums whitespace-nowrap shrink-0 mr-1">
+                {isLoading ? (
+                  <>
+                    <RefreshCw className="w-3 h-3 animate-spin text-emerald-400 shrink-0" />
+                    <span className="text-emerald-400">
+                      {refinementStage === "draft_ready" ? "Verifying..." : "Streaming..."}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                    <span>{wordCount.toLocaleString()} words</span>
+                  </>
+                )}
+              </span>
               <button
                 onClick={handleCopy}
                 className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1.5 border border-zinc-700/60 flex-1 sm:flex-initial"
@@ -547,9 +686,18 @@ export default function SingleDocumentView({
               </button>
 
               <button
+                onClick={handleExportOKFJsonBundle}
+                className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition flex items-center justify-center gap-1.5 flex-1 sm:flex-initial whitespace-nowrap shrink-0 cursor-pointer"
+                title="Export OKF v0.2 compliant JSON bundle including generated Markdown, annotations, typed entities, section hierarchy, and links."
+              >
+                <FileJson className="w-3.5 h-3.5 shrink-0" />
+                <span>Export OKF (.json)</span>
+              </button>
+
+              <button
                 onClick={handleExportOKFBundle}
                 disabled={isExportingOKF}
-                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition flex items-center justify-center gap-1.5 shadow flex-1 sm:flex-initial"
+                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition flex items-center justify-center gap-1.5 shadow flex-1 sm:flex-initial whitespace-nowrap shrink-0 cursor-pointer"
                 title="Export structured Open Knowledge Format bundle (OKF v0.2) as a ZIP with typed concepts, index, and logs."
               >
                 <Archive className="w-3.5 h-3.5 shrink-0" />
@@ -586,6 +734,11 @@ export default function SingleDocumentView({
                   spatialData={spatialData || null}
                   isLoading={isLoadingSpatial}
                   onRefreshInspection={onRefreshSpatialInspection}
+                  convertedMarkdown={convertedMarkdown}
+                  onMarkdownChange={onMarkdownChange}
+                  onOpenEditor={() => setActiveTab("raw")}
+                  onReconvertWithVision={handleReconvertWithVision}
+                  base64Data={base64Data}
                 />
               </ErrorBoundary>
             )}
@@ -602,7 +755,10 @@ export default function SingleDocumentView({
 
             {activeTab === "okf" && (
               <ErrorBoundary title="OKF Knowledge Explorer Error">
-                <OKFExplorer markdown={convertedMarkdown} />
+                <OKFExplorer
+                  markdown={convertedMarkdown}
+                  sourceFileName={file?.name || "document.md"}
+                />
               </ErrorBoundary>
             )}
 
@@ -626,6 +782,24 @@ export default function SingleDocumentView({
               </ErrorBoundary>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Standalone PDF Quality Heatmap View when inspected prior to conversion */}
+      {!convertedMarkdown && !isLoading && activeTab === "spatial" && spatialData && (
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-3 sm:p-5">
+          <ErrorBoundary title="Spatial Layout Inspector Error">
+            <SpatialLayoutInspector
+              spatialData={spatialData}
+              isLoading={isLoadingSpatial}
+              onRefreshInspection={onRefreshSpatialInspection}
+              convertedMarkdown={convertedMarkdown}
+              onMarkdownChange={onMarkdownChange}
+              onOpenEditor={() => setActiveTab("raw")}
+              onReconvertWithVision={handleReconvertWithVision}
+              base64Data={base64Data}
+            />
+          </ErrorBoundary>
         </div>
       )}
     </div>

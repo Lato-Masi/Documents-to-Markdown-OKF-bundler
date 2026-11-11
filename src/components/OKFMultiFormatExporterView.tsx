@@ -11,6 +11,7 @@ import HighlightedCodeBlock from './HighlightedCodeBlock';
 import OKFSparqlQueryWorkbench from './OKFSparqlQueryWorkbench';
 import OKFMcpToolConfigGenerator from './OKFMcpToolConfigGenerator';
 import OKFJsonLdEnterpriseExporter from './OKFJsonLdEnterpriseExporter';
+import OKFJsonBundleExporterPanel from './OKFJsonBundleExporterPanel';
 import {
   FileJson,
   Database,
@@ -33,16 +34,20 @@ interface OKFMultiFormatExporterViewProps {
   bundle: OkfBundle;
   semanticGraph?: SemanticGraphResult;
   nlpAnalyses?: Record<string, NLPConceptAnalysis>;
+  rawMarkdown?: string;
+  sourceFileName?: string;
 }
 
 export default function OKFMultiFormatExporterView({
   bundle,
   semanticGraph,
   nlpAnalyses,
+  rawMarkdown,
+  sourceFileName,
 }: OKFMultiFormatExporterViewProps) {
   const [activeFormat, setActiveFormat] = useState<
-    'jsonld' | 'turtle' | 'sparql' | 'mcp' | 'obsidian' | 'viz'
-  >('jsonld');
+    'okf-json' | 'jsonld' | 'turtle' | 'sparql' | 'mcp' | 'obsidian' | 'viz'
+  >('okf-json');
   const [copied, setCopied] = useState<string | null>(null);
 
   const exportResult: MultiFormatExportResult = useMemo(() => {
@@ -178,8 +183,26 @@ export default function OKFMultiFormatExporterView({
         </div>
       </div>
 
-      {/* Format Selector Pills */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+      {/* Format Selector Controls */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+        <button
+          type="button"
+          onClick={() => setActiveFormat('okf-json')}
+          className={`p-3 rounded-xl border text-left transition flex items-center gap-2.5 cursor-pointer ${
+            activeFormat === 'okf-json'
+              ? 'bg-emerald-50/80 border-emerald-500 text-emerald-950 shadow-2xs'
+              : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+          }`}
+        >
+          <div className={`p-2 rounded-lg shrink-0 ${activeFormat === 'okf-json' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'}`}>
+            <Layers className="w-4 h-4" />
+          </div>
+          <div className="flex flex-col min-w-0">
+            <span className="text-xs font-bold truncate">OKF v0.2 JSON</span>
+            <span className="text-[10px] text-slate-500 font-mono truncate">Entities & Annotations</span>
+          </div>
+        </button>
+
         <button
           type="button"
           onClick={() => setActiveFormat('viz')}
@@ -289,7 +312,16 @@ export default function OKFMultiFormatExporterView({
         </button>
       </div>
 
-      {activeFormat === 'sparql' ? (
+      {activeFormat === 'okf-json' ? (
+        <OKFJsonBundleExporterPanel
+          markdown={
+            rawMarkdown ||
+            bundle.concepts.map((c) => c.body).join('\n\n---\n\n')
+          }
+          sourceFileName={sourceFileName || `${bundle.root || 'document'}.md`}
+          bundleName={bundle.root}
+        />
+      ) : activeFormat === 'sparql' ? (
         <OKFSparqlQueryWorkbench bundle={bundle} semanticGraph={semanticGraph} />
       ) : activeFormat === 'mcp' ? (
         <OKFMcpToolConfigGenerator bundle={bundle} semanticGraph={semanticGraph} />

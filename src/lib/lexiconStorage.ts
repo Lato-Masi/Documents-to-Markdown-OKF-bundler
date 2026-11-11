@@ -188,12 +188,21 @@ export const BUILTIN_LEXICON_PRESETS: LexiconPresetPack[] = [
 const STORAGE_KEY = 'doc_conv_custom_lexicon';
 const HIDDEN_PRESETS_KEY = 'doc_conv_hidden_presets';
 
+function hasBrowserLocalStorage(): boolean {
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Loads the list of hidden/deleted built-in preset IDs.
  */
 export function loadHiddenPresetIds(): string[] {
+  if (!hasBrowserLocalStorage()) return [];
   try {
-    const saved = localStorage.getItem(HIDDEN_PRESETS_KEY);
+    const saved = window.localStorage.getItem(HIDDEN_PRESETS_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed)) return parsed;
@@ -208,8 +217,9 @@ export function loadHiddenPresetIds(): string[] {
  * Saves hidden/deleted built-in preset IDs to localStorage.
  */
 export function saveHiddenPresetIds(hiddenIds: string[]): void {
+  if (!hasBrowserLocalStorage()) return;
   try {
-    localStorage.setItem(HIDDEN_PRESETS_KEY, JSON.stringify(hiddenIds));
+    window.localStorage.setItem(HIDDEN_PRESETS_KEY, JSON.stringify(hiddenIds));
   } catch (e) {
     console.error('Failed to save hidden presets list', e);
   }
@@ -219,16 +229,18 @@ export function saveHiddenPresetIds(hiddenIds: string[]): void {
  * Loads custom lexicon entries from localStorage with fallback to default preset entries.
  */
 export function loadCustomLexicon(): CustomLexiconEntry[] {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) {
-        return parsed;
+  if (hasBrowserLocalStorage()) {
+    try {
+      const saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
       }
+    } catch (e) {
+      console.error('Failed to load custom lexicon from storage', e);
     }
-  } catch (e) {
-    console.error('Failed to load custom lexicon from storage', e);
   }
 
   // Default initial set seeded from built-in presets
@@ -243,7 +255,9 @@ export function loadCustomLexicon(): CustomLexiconEntry[] {
     });
   });
 
-  saveCustomLexicon(initialEntries);
+  if (hasBrowserLocalStorage()) {
+    saveCustomLexicon(initialEntries);
+  }
   return initialEntries;
 }
 
@@ -251,8 +265,9 @@ export function loadCustomLexicon(): CustomLexiconEntry[] {
  * Saves custom lexicon entries to localStorage.
  */
 export function saveCustomLexicon(entries: CustomLexiconEntry[]): void {
+  if (!hasBrowserLocalStorage()) return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
   } catch (e) {
     console.error('Failed to save custom lexicon to storage', e);
   }

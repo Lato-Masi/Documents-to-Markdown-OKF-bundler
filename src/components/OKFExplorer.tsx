@@ -9,7 +9,14 @@ import {
   isStale,
   getStatus,
 } from '../lib/okfKnowledgeEngine';
-import { exportOKFBundleAsZip, downloadZipBlob, generateStandaloneOKFVisualizerHTML } from '../utils/okfZipExporter';
+import {
+  exportOKFBundleAsZip,
+  downloadZipBlob,
+  generateStandaloneOKFVisualizerHTML,
+  buildOKFv02JsonBundle,
+  downloadOKFv02JsonBundle,
+  loadDocumentAnnotations,
+} from '../utils/okfZipExporter';
 import OKFGraphVisualizer from './OKFGraphVisualizer';
 import HighlightedCodeBlock from './HighlightedCodeBlock';
 import OKFMultiFormatExporterView from './OKFMultiFormatExporterView';
@@ -68,6 +75,7 @@ import type { OkfConcept, OkfMetadata } from 'okf-ts';
 
 interface OKFExplorerProps {
   markdown?: string;
+  sourceFileName?: string;
   documents?: { fileName: string; markdown: string }[];
 }
 
@@ -93,7 +101,7 @@ The **Open Knowledge Format (OKF)** is an open, vendor-neutral specification (su
 - Repository: https://github.com/Zenb0t/okf-ts
 `;
 
-export default function OKFExplorer({ markdown, documents }: OKFExplorerProps) {
+export default function OKFExplorer({ markdown, sourceFileName, documents }: OKFExplorerProps) {
   const [activeSubTab, setActiveSubTab] = useState<
     | 'human-nl'
     | 'graph'
@@ -278,6 +286,39 @@ export default function OKFExplorer({ markdown, documents }: OKFExplorerProps) {
     }
   };
 
+  const effectiveSourceFileName =
+    sourceFileName || documents?.[0]?.fileName || 'converted-document.md';
+  const effectiveMarkdown = useMemo(() => {
+    if (markdown && markdown.trim()) return markdown;
+    if (documents && documents.length > 0) {
+      return documents
+        .map((d) => d.markdown)
+        .filter(Boolean)
+        .join('\n\n---\n\n');
+    }
+    return '';
+  }, [markdown, documents]);
+
+  // Export OKF v0.2 JSON Bundle with Annotations, Entities, Hierarchy & Links
+  const handleExportJsonBundle = () => {
+    try {
+      const baseName =
+        effectiveSourceFileName.replace(/\.[^/.]+$/, '') || 'knowledge-base';
+      const userAnnotations = loadDocumentAnnotations(effectiveSourceFileName);
+      const bundleJson = buildOKFv02JsonBundle(effectiveMarkdown, {
+        sourceFileName: effectiveSourceFileName,
+        bundleName: okfResult.bundle.root || baseName,
+        annotations: userAnnotations,
+        includeAutomatedAnnotations: true,
+        includeRawMarkdown: true,
+        similarityThreshold,
+      });
+      downloadOKFv02JsonBundle(bundleJson, `${baseName}.okf.json`);
+    } catch (err) {
+      console.error('Failed to export OKF JSON bundle:', err);
+    }
+  };
+
   // Filtered concepts for NLP Matrix
   const filteredConceptsForNlp = useMemo(() => {
     if (!nlpSearchFilter.trim()) return okfResult.concepts;
@@ -369,12 +410,22 @@ export default function OKFExplorer({ markdown, documents }: OKFExplorerProps) {
 
           <button
             type="button"
+            onClick={handleExportJsonBundle}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-xs font-medium text-white transition cursor-pointer shadow-2xs whitespace-nowrap shrink-0"
+            title="Export OKF v0.2 compliant JSON bundle with Markdown, annotations, typed entities, hierarchy, and links"
+          >
+            <FileJson className="w-3.5 h-3.5 shrink-0" />
+            <span>Export OKF (.json)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleExportZip}
             disabled={isExportingZip}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-medium text-white transition cursor-pointer shadow-2xs"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-medium text-white transition cursor-pointer shadow-2xs whitespace-nowrap shrink-0"
             title="Export standard OKF v0.2 Knowledge Base ZIP package"
           >
-            <Archive className="w-3.5 h-3.5" />
+            <Archive className="w-3.5 h-3.5 shrink-0" />
             <span>{isExportingZip ? 'Packaging...' : 'Export OKF Bundle (.zip)'}</span>
           </button>
         </div>
@@ -1565,12 +1616,14 @@ export default function OKFExplorer({ markdown, documents }: OKFExplorerProps) {
           />
         )}
 
-        {/* SubTab: Multi-Format Semantic Exporter (JSON-LD, RDF Turtle, MCP Schema, Obsidian) */}
+        {/* SubTab: Multi-Format Semantic Exporter (OKF v0.2 JSON, JSON-LD, RDF Turtle, MCP Schema, Obsidian) */}
         {activeSubTab === 'multi-format' && (
           <OKFMultiFormatExporterView
             bundle={okfResult.bundle}
             semanticGraph={okfResult.semanticGraph}
             nlpAnalyses={okfResult.nlpAnalyses}
+            rawMarkdown={effectiveMarkdown}
+            sourceFileName={effectiveSourceFileName}
           />
         )}
 

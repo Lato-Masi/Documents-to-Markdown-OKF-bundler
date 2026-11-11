@@ -2,89 +2,145 @@
  * @file server.ts
  * @description Full-stack Express application entrypoint.
  *
- * Mounts REST routes for multimodal document processing, NLP analysis, Remote API v1, and MCP JSON-RPC endpoints.
- * Includes production security headers, request correlation IDs, global JSON error boundary middleware,
- * and graceful shutdown persistence hooks.
+ * Binds immediately to 0.0.0.0:3000 for sub-second startup probe readiness, while asynchronously
+ * loading API routers and Vite SPA middleware behind a request-readiness gate so early requests
+ * wait cleanly instead of 404ing or timing out.
  */
 
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response, NextFunction, Router } from "express";
 import path from "path";
 import crypto from "crypto";
 import dotenv from "dotenv";
-import { createServer as createViteServer } from "vite";
-import convertRouter from "./server/routes/convert";
-import analysisRouter from "./server/routes/analysis";
-import mcpRouter from "./server/routes/mcp";
-import skillsRouter from "./server/routes/skills";
-import metaAstRouter from "./server/routes/metaAst";
-import remoteApiRouter from "./server/routes/remoteApi";
-import { flushStoreToDiskSync } from "./server/utils/apiKeyManager";
 
-// Load environment variables from .env
-dotenv.config();
+// Load environment variables from .env quietly
+dotenv.config({ quiet: true } as any);
 
-/**
- * Initializes and starts the Express HTTP server.
- */
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Disable X-Powered-By header to avoid fingerprinting
   app.disable("x-powered-by");
 
-  // Bind to 0.0.0.0:3000 immediately to ensure startup TCP health probes succeed instantly
+  // Bind to 0.0.0.0:3000 immediately (<250ms) before loading heavy document/NLP/Vite modules
   const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Open Knowledge Server running on http://0.0.0.0:${PORT}`);
+    console.log(`Open Knowledge Server listening on http://0.0.0.0:${PORT}`);
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    console.error(`[Server Fatal] Failed to bind port ${PORT}:`, err.message);
+    process.exit(1);
   });
 
   // Baseline Security & Request Correlation Middleware
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const reqId = (req.headers["x-request-id"] as string) || `req_${crypto.randomBytes(6).toString("hex")}`;
+    const reqId =
+      (req.headers["x-request-id"] as string) ||
+      `req_${crypto.randomBytes(6).toString("hex")}`;
     res.setHeader("X-Request-Id", reqId);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     next();
   });
 
-  // Health check endpoint (Available immediately for container probes)
-  app.get("/api/health", (req: Request, res: Response) => {
-    res.json({ status: "ok", uptime: process.uptime() });
+  // Immediate health check endpoint for container & control-plane probes
+  let subsystemsInitialized = false;
+  app.get("/api/health", (_req: Request, res: Response) => {
+    res.json({
+      status: "ok",
+      ready: subsystemsInitialized,
+      uptime: process.uptime(),
+    });
   });
 
   // Middleware: Allow high-resolution document and image payloads up to 50MB
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-  // Register Remote API v1 Gateway (/api/v1/* with strict API key authentication & CORS)
-  app.use("/api", remoteApiRouter);
+  // Dynamic router container populated once async initialization completes
+  const mainRouter = Router();
+  let flushStoreFn: (() => void) | null = null;
 
-  // Register Core Subsystem REST Routes
-  // 1. Multimodal OCR, spatial inspection, web scraping & RAG agent endpoints
-  app.use("/api", convertRouter);
-  // 2. Readability, sentiment, entity extraction & complexity analysis
-  app.use("/api", analysisRouter);
-  // 3. Model Context Protocol (MCP) JSON-RPC 2.0 tools & knowledge base sync
-  app.use("/api", mcpRouter);
-  // 4. Agent Skills procedural synthesis, validation & formal logic compiler
-  app.use("/api", skillsRouter);
-  // 5. MetaAST Lexer, Parser & Vector DB Ingestion endpoints
-  app.use("/api", metaAstRouter);
+  const initPromise = (async () => {
+    const [
+      { default: remoteApiRouter },
+      { default: convertRouter },
+      { default: analysisRouter },
+      { default: mcpRouter },
+      { default: skillsRouter },
+      { default: metaAstRouter },
+      { flushStoreToDiskSync },
+    ] = await Promise.all([
+      import("./server/routes/remoteApi"),
+      import("./server/routes/convert"),
+      import("./server/routes/analysis"),
+      import("./server/routes/mcp"),
+      import("./server/routes/skills"),
+      import("./server/routes/metaAst"),
+      import("./server/utils/apiKeyManager"),
+    ]);
 
-  // Unmatched /api/* 404 JSON Handler
-  app.use("/api/*", (req: Request, res: Response) => {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "API_ENDPOINT_NOT_FOUND",
-        message: `Endpoint ${req.method} ${req.originalUrl} does not exist.`,
-        docsUrl: "/api/v1/openapi.json",
-      },
+    flushStoreFn = flushStoreToDiskSync;
+
+    // 1. Remote API v1 Gateway (/api/v1/* with strict API key authentication & CORS)
+    mainRouter.use("/api", remoteApiRouter);
+    // 2. Multimodal OCR, spatial inspection, web scraping & RAG agent endpoints
+    mainRouter.use("/api", convertRouter);
+    // 3. Readability, sentiment, entity extraction & complexity analysis
+    mainRouter.use("/api", analysisRouter);
+    // 4. Model Context Protocol (MCP) JSON-RPC 2.0 tools & knowledge base sync
+    mainRouter.use("/api", mcpRouter);
+    // 5. Agent Skills procedural synthesis, validation & formal logic compiler
+    mainRouter.use("/api", skillsRouter);
+    // 6. MetaAST Lexer, Parser & Vector DB Ingestion endpoints
+    mainRouter.use("/api", metaAstRouter);
+
+    // Unmatched /api/* 404 JSON Handler
+    mainRouter.use("/api/*", (req: Request, res: Response) => {
+      res.status(404).json({
+        success: false,
+        error: {
+          code: "API_ENDPOINT_NOT_FOUND",
+          message: `Endpoint ${req.method} ${req.originalUrl} does not exist.`,
+          docsUrl: "/api/v1/openapi.json",
+        },
+      });
     });
+
+    // Client Frontend Serving: Vite dev server in development vs. static assets in production
+    if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      mainRouter.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      mainRouter.use(express.static(distPath));
+      mainRouter.get("*", (_req: Request, res: Response) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
+
+    subsystemsInitialized = true;
+    console.log(`Open Knowledge Server ready (API routes & frontend mounted)`);
+  })();
+
+  // Hold incoming requests until routes & Vite middleware finish mounting (eliminates cold-boot 404/502 races)
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!subsystemsInitialized) {
+        await initPromise;
+      }
+      return mainRouter(req, res, next);
+    } catch (err) {
+      return next(err);
+    }
   });
 
   // Global Express Error Boundary Middleware (Catches malformed JSON SyntaxErrors & unhandled API errors)
-  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) {
       return next(err);
     }
@@ -119,25 +175,14 @@ async function startServer() {
     });
   });
 
-  // Client Frontend Serving: Vite dev server in development vs. static assets in production
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
-
   // Graceful Shutdown & Disk Persistence Hooks
   const gracefulShutdown = (signal: string) => {
-    console.log(`[Server] Received ${signal}. Flushing API store to disk and closing HTTP server...`);
-    flushStoreToDiskSync();
+    console.log(
+      `[Server] Received ${signal}. Flushing API store to disk and closing HTTP server...`
+    );
+    if (flushStoreFn) {
+      flushStoreFn();
+    }
     server.close(() => {
       process.exit(0);
     });
@@ -147,4 +192,7 @@ async function startServer() {
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("[Server Startup Fatal]:", err);
+  process.exit(1);
+});

@@ -5,8 +5,8 @@ import SingleDocumentView from "./components/SingleDocumentView";
 import ConversionHistory from "./components/ConversionHistory";
 import ErrorBoundary from "./components/ErrorBoundary";
 import DiagnosticConsole, { DiagnosticLog, StreamMetrics } from "./components/DiagnosticConsole";
-import { HistoryItem, ConversionMode, TargetStyle, VisionModelType, ViewMode, SourceType, TabType, SpatialDocumentResult } from "./types";
-import { getMimeTypeByExtension } from "./utils/fileHelpers";
+import { HistoryItem, ConversionMode, TargetStyle, VisionModelType, ViewMode, SourceType, TabType, SpatialDocumentResult, RefinementStage } from "./types";
+import { getMimeTypeByExtension, validateDocumentFile } from "./utils/fileHelpers";
 import { cleanMarkdownOutput } from "./utils/markdownCleaner";
 import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search, Database, GitBranch, BookOpen, Terminal } from "lucide-react";
 import MultiDocProcessingHub from "./components/MultiDocProcessingHub";
@@ -46,10 +46,14 @@ export default function App() {
   const [isLexiconConfigOpen, setIsLexiconConfigOpen] = useState<boolean>(false);
   const [customApiKey, setCustomApiKey] = useState<string>(() => getCustomApiKey());
 
-  // Spatial Layout & Quality Threshold State
+  // Spatial Layout, SHA-256 Cache & Two-Stage Refinement State
   const [spatialData, setSpatialData] = useState<SpatialDocumentResult | null>(null);
   const [isLoadingSpatial, setIsLoadingSpatial] = useState<boolean>(false);
   const [qualityThreshold, setQualityThreshold] = useState<number>(75);
+  const [refinementStage, setRefinementStage] = useState<RefinementStage>("idle");
+  const [conversionElapsedMs, setConversionElapsedMs] = useState<number | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const spatialInspectPromiseRef = useRef<Promise<SpatialDocumentResult | null> | null>(null);
 
   // Diagnostic Console State
   const [logs, setLogs] = useState<DiagnosticLog[]>([]);
@@ -153,9 +157,19 @@ export default function App() {
 
     let stepIdx = 0;
 
+    const thinkingLabel =
+      conversionMode === "rich" || visionModel === "gemini-4-argon" ? "Medium" : "Low";
+
     const updateProgressText = () => {
       const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
       const elapsedStr = `${elapsedSec}s elapsed`;
+
+      if (refinementStage === "draft_ready") {
+        setLoadingStep(
+          `${modelLabel} (${thinkingLabel} Thinking) verifying multi-column layout, GFM charts & attributed quotes... • ${elapsedStr}`
+        );
+        return;
+      }
 
       // Check if we have received real body markdown beyond the initial banner header
       const isOnlyBannerHeader =
@@ -169,11 +183,11 @@ export default function App() {
         const wordCount = convertedMarkdown.trim().split(/\s+/).filter(Boolean).length.toLocaleString();
         const lineCount = convertedMarkdown.split("\n").length.toLocaleString();
         setLoadingStep(
-          `Streaming raw Markdown... Received ${charCount} chars (~${wordCount} words, ${lineCount} lines) • ${elapsedStr}`
+          `Streaming refined Markdown... ${charCount} chars (~${wordCount} words, ${lineCount} lines) • ${elapsedStr}`
         );
       } else if (isOnlyBannerHeader) {
         setLoadingStep(
-          `${modelLabel} processing complex document layout & charts... (Pipeline initialized) • ${elapsedStr}`
+          `${modelLabel} (${thinkingLabel} Thinking) processing complex document layout & charts... • ${elapsedStr}`
         );
       } else {
         const currentStep = steps[stepIdx % steps.length];
@@ -189,7 +203,7 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isLoading, convertedMarkdown, file, visionModel]);
+  }, [isLoading, convertedMarkdown, file, visionModel, refinementStage, conversionMode]);
 
   // Handle Drag & Drop
   const handleDrag = (e: React.DragEvent) => {
@@ -212,45 +226,88 @@ export default function App() {
     }
   };
 
-  // Fetch 2D Spatial Layout & Quality Inspection from LiteParse engine
-  const fetchSpatialInspection = async (base64: string, name: string, thresh: number) => {
+  // Fetch 2D Spatial Layout & Quality Inspection from LiteParse engine (supports SHA-256 documentHash & sampleId)
+  const fetchSpatialInspection = async (
+    base64: string,
+    name: string,
+    thresh: number,
+    opts?: { documentHash?: string; sampleId?: string; autoPopulateDraft?: boolean }
+  ): Promise<SpatialDocumentResult | null> => {
     const isPdf = name.toLowerCase().endsWith(".pdf");
-    if (!isPdf || !base64) {
+    if (!isPdf || (!base64 && !opts?.documentHash && !opts?.sampleId)) {
       setSpatialData(null);
-      return;
+      return null;
     }
     setIsLoadingSpatial(true);
-    try {
-      const res = await fetch("/api/spatial-inspect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+    const task = (async (): Promise<SpatialDocumentResult | null> => {
+      try {
+        const payload: Record<string, any> = {
           fileName: name,
           fileType: "application/pdf",
-          base64Data: base64,
           qualityThreshold: thresh,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.result) {
-          setSpatialData(data.result);
-          addLog("info", `[LiteParse] Spatial 2D Inspection Complete: ${data.result.totalPages} pages, Quality Score: ${data.result.quality.qualityScore}/100 (${data.result.quality.decision})`);
+        };
+        if (opts?.documentHash) {
+          payload.documentHash = opts.documentHash;
+        } else if (opts?.sampleId) {
+          payload.sampleId = opts.sampleId;
+        } else {
+          payload.base64Data = base64;
         }
+
+        const res = await fetch("/api/spatial-inspect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.result) {
+            const result: SpatialDocumentResult = data.result;
+            setSpatialData(result);
+            if (opts?.autoPopulateDraft && result.markdown) {
+              setConvertedMarkdown((prev) => prev || result.markdown);
+              setRefinementStage((prev) => (prev === "idle" ? "draft_ready" : prev));
+            }
+            const timingNote = result.cacheHit
+              ? "SHA-256 Cache Hit <1ms"
+              : `${result.executionTimeMs}ms`;
+            addLog(
+              "info",
+              `[LiteParse] Spatial 2D Inspection Complete (${timingNote}): ${result.totalPages} pages, Score: ${result.quality.qualityScore}/100 (${result.quality.decision})`
+            );
+            return result;
+          }
+        }
+      } catch (e) {
+        console.warn("Spatial inspection fetch notice:", e);
+      } finally {
+        setIsLoadingSpatial(false);
       }
-    } catch (e) {
-      console.warn("Spatial inspection fetch notice:", e);
-    } finally {
-      setIsLoadingSpatial(false);
-    }
+      return null;
+    })();
+
+    spatialInspectPromiseRef.current = task;
+    return task;
   };
 
   // Convert File to Base64 and register in state
   const handleFileSelection = async (selectedFile: File) => {
+    abortControllerRef.current?.abort();
     setError("");
     setConvertedMarkdown("");
-    setFile(selectedFile);
+    setRefinementStage("idle");
+    setConversionElapsedMs(null);
     setSpatialData(null);
+
+    const validation = validateDocumentFile(selectedFile);
+    if (!validation.valid) {
+      setFile(null);
+      setBase64Data("");
+      setError(validation.error || "Unsupported or invalid file.");
+      return;
+    }
+
+    setFile(selectedFile);
 
     try {
       const reader = new FileReader();
@@ -258,9 +315,11 @@ export default function App() {
         const result = reader.result as string;
         const base64Str = result.split(",")[1];
         setBase64Data(base64Str);
-        // Automatically inspect PDF spatial layout in background
+        // Automatically inspect PDF spatial layout and show instant <100ms 2D draft
         if (selectedFile.name.toLowerCase().endsWith(".pdf")) {
-          fetchSpatialInspection(base64Str, selectedFile.name, qualityThreshold);
+          fetchSpatialInspection(base64Str, selectedFile.name, qualityThreshold, {
+            autoPopulateDraft: true,
+          });
         }
       };
       reader.onerror = () => {
@@ -283,10 +342,14 @@ export default function App() {
   };
 
   const handleClear = () => {
+    abortControllerRef.current?.abort();
+    setIsLoading(false);
     setFile(null);
     setBase64Data("");
     setConvertedMarkdown("");
     setSpatialData(null);
+    setRefinementStage("idle");
+    setConversionElapsedMs(null);
     setError("");
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -294,37 +357,55 @@ export default function App() {
   };
 
   // Load the attached complex Policy Brief PDF sample (/assets/aistudio/ARK-Urban-Primary-Care-NCD-Policy-Brief_f91069ba.pdf)
+  // Uses Standard + GFM mode default and server-side direct disk spatial inspection (<100ms instant 2D draft, zero base64 upload)
   const handleLoadSamplePolicyBrief = async () => {
+    abortControllerRef.current?.abort();
     setIsLoadingSamplePdf(true);
     setError("");
+    setConvertedMarkdown("");
+    setSpatialData(null);
+    setRefinementStage("idle");
+    setConversionElapsedMs(null);
+
     try {
       const sampleUrl = "/assets/aistudio/ARK-Urban-Primary-Care-NCD-Policy-Brief_f91069ba.pdf";
-      const res = await fetch(sampleUrl);
+      setConversionMode("standard");
+      setTargetStyle("gfm");
+      setActiveTab("preview");
+
+      const [res, spatialRes] = await Promise.all([
+        fetch(sampleUrl),
+        fetchSpatialInspection("", "ARK-Urban-Primary-Care-NCD-Policy-Brief.pdf", qualityThreshold, {
+          sampleId: "ark-policy-brief",
+          autoPopulateDraft: true,
+        }),
+      ]);
+
       if (!res.ok) {
         throw new Error(`Could not load sample PDF (${res.status})`);
       }
+
       const blob = await res.blob();
       const sampleFile = new File(
         [blob],
         "ARK-Urban-Primary-Care-NCD-Policy-Brief.pdf",
         { type: "application/pdf" }
       );
-      setConversionMode("rich");
-      setTargetStyle("gfm");
       setFile(sampleFile);
-      setConvertedMarkdown("");
-      setSpatialData(null);
 
-      const arrayBuf = await blob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuf);
-      let binary = "";
-      const chunkSize = 8192;
-      for (let i = 0; i < bytes.length; i += chunkSize) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      if (spatialRes?.markdown) {
+        setConvertedMarkdown(spatialRes.markdown);
+        setRefinementStage("draft_ready");
       }
-      const base64Str = btoa(binary);
-      setBase64Data(base64Str);
-      fetchSpatialInspection(base64Str, sampleFile.name, qualityThreshold);
+
+      // Encode base64 asynchronously as fallback only if server cache is ever evicted
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const b64 = dataUrl.split(",")[1] || "";
+        setBase64Data(b64);
+      };
+      reader.readAsDataURL(blob);
     } catch (err: any) {
       setError(err?.message || "Failed to load sample Policy Brief PDF.");
     } finally {
@@ -332,23 +413,78 @@ export default function App() {
     }
   };
 
-  // Convert loaded file to markdown via backend endpoint
+  // Keep the instant <100ms 2D Spatial Draft and cancel any in-flight multimodal refinement pass
+  const handleKeepInstantDraft = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    const draftMd = spatialData?.markdown || convertedMarkdown;
+    if (draftMd) {
+      setConvertedMarkdown(draftMd);
+    }
+    setIsLoading(false);
+    setRefinementStage("completed");
+    const elapsed = metrics.startTime ? Date.now() - metrics.startTime : 0;
+    setConversionElapsedMs(elapsed);
+    setMetrics((m) => ({ ...m, status: "completed", endTime: Date.now() }));
+    addLog("success", "Kept Instant 2D Spatial Draft (cancelled multimodal refinement stream).");
+
+    if (file && draftMd && draftMd.trim()) {
+      const newItem: HistoryItem = {
+        id: Date.now().toString(),
+        fileName: file.name,
+        fileSize: file.size,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        markdownContent: draftMd,
+        sourceType: "file",
+      };
+      const updatedHistory = [newItem, ...history.filter((h) => h.id !== newItem.id).slice(0, 49)];
+      setHistory(updatedHistory);
+      localStorage.setItem("doc_conv_history", JSON.stringify(updatedHistory));
+    }
+  };
+
+  // Convert loaded file to markdown via backend endpoint (Two-Stage Instant 2D Draft -> Fast Gemini Refinement)
   const handleConvert = async () => {
-    if (!file || !base64Data) {
+    if (!file || (!base64Data && !spatialData?.documentHash)) {
       setError("Please import or drop a document first.");
       return;
     }
 
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const isPdf = file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
+    let activeSpatial = spatialData;
+    if (isPdf && !activeSpatial && spatialInspectPromiseRef.current) {
+      activeSpatial = await spatialInspectPromiseRef.current;
+    }
+
+    const instantDraft = isPdf && activeSpatial?.markdown ? activeSpatial.markdown : "";
+
     setIsLoading(true);
     setError("");
-    setConvertedMarkdown("");
+    setConversionElapsedMs(null);
     setActiveTab("preview");
+
+    if (instantDraft) {
+      setConvertedMarkdown(instantDraft);
+      setRefinementStage("draft_ready");
+    } else {
+      setConvertedMarkdown("");
+      setRefinementStage("idle");
+    }
 
     const mimeType = getMimeTypeByExtension(file.name, file.type);
     const startMs = Date.now();
 
     clearLogs();
-    addLog("info", `Initiated POST /api/convert for file: ${file.name} (${(file.size / 1024).toFixed(1)} KB, Vision Model: ${visionModel}, Quality Threshold: ${qualityThreshold}%)`);
+    addLog(
+      "info",
+      `Initiated POST /api/convert for ${file.name} (${(file.size / 1024).toFixed(1)} KB · Mode: ${conversionMode} · Model: ${visionModel}${
+        activeSpatial?.documentHash ? " · SHA-256 Cached" : ""
+      })`
+    );
     setMetrics({
       status: "connecting",
       chunksReceived: 0,
@@ -370,10 +506,13 @@ export default function App() {
       const response = await fetch("/api/convert", {
         method: "POST",
         headers,
+        signal: controller.signal,
         body: JSON.stringify({
           fileName: file.name,
           fileType: mimeType,
-          base64Data,
+          // Omit multi-MB base64 upload when SHA-256 documentHash is already cached on the server
+          base64Data: activeSpatial?.documentHash ? undefined : base64Data,
+          documentHash: activeSpatial?.documentHash,
           conversionMode,
           targetStyle,
           qualityThreshold,
@@ -399,6 +538,7 @@ export default function App() {
       let chunkCount = 0;
       let totalBytes = 0;
       let lastRenderTime = 0;
+      let hasReceivedRealTokens = false;
 
       if (!reader) {
         throw new Error("Streaming reader is not supported by the browser.");
@@ -433,7 +573,7 @@ export default function App() {
             addLog("chunk", `Received ${chunkCount} chunks (${(totalBytes / 1024).toFixed(1)} KB total)`);
           }
 
-          // Inspect server telemetry stream lines in real time for Diagnostic Console
+          // Route server telemetry lines strictly to Diagnostic Console without blanking the Stage 1 draft
           const lines = chunkStr.split("\n");
           for (const line of lines) {
             const trimmed = line.trim();
@@ -454,19 +594,28 @@ export default function App() {
             }
           }
 
-          // Frame-buffered / Throttled React state update (5 FPS) to keep browser main thread ultra-responsive
-          if (done || now - lastRenderTime > 200) {
-            setConvertedMarkdown(cleanMarkdownOutput(accumulated));
+          // Frame-throttled React state update (4 FPS / 250ms) once real Markdown tokens arrive
+          if (done || now - lastRenderTime > 250) {
+            const cleanedStream = cleanMarkdownOutput(accumulated);
+            if (cleanedStream.length > 0) {
+              if (!hasReceivedRealTokens) {
+                hasReceivedRealTokens = true;
+                setRefinementStage("refining_stream");
+              }
+              setConvertedMarkdown(cleanedStream);
+            }
             lastRenderTime = now;
           }
         }
       }
 
-      // Guarantee 100% final flush
-      const cleanedFinal = cleanMarkdownOutput(accumulated);
+      // Guarantee 100% final flush (preserving Stage 1 draft if stream had no body tokens)
+      const cleanedFinal = cleanMarkdownOutput(accumulated) || instantDraft;
       setConvertedMarkdown(cleanedFinal);
+      setRefinementStage("completed");
 
       const endMs = Date.now();
+      setConversionElapsedMs(endMs - startMs);
       addLog(
         "success",
         `Stream completed in ${((endMs - startMs) / 1000).toFixed(2)}s`,
@@ -490,13 +639,23 @@ export default function App() {
         localStorage.setItem("doc_conv_history", JSON.stringify(updatedHistory));
       }
     } catch (err: any) {
+      if (err?.name === "AbortError") {
+        return;
+      }
       console.error(err);
       const msg = err.message || "An unexpected error occurred during processing.";
       addLog("error", "Stream Failure / Abort", msg);
       setMetrics((m) => ({ ...m, status: "error", endTime: Date.now() }));
+      if (instantDraft) {
+        setConvertedMarkdown(instantDraft);
+        setRefinementStage("completed");
+      }
       setError(msg);
     } finally {
-      setIsLoading(false);
+      if (abortControllerRef.current === controller) {
+        setIsLoading(false);
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -971,12 +1130,18 @@ export default function App() {
                 spatialData={spatialData}
                 isLoadingSpatial={isLoadingSpatial}
                 onRefreshSpatialInspection={(thresh) => {
-                  if (base64Data && file) {
-                    fetchSpatialInspection(base64Data, file.name, thresh);
+                  if (file && (spatialData?.documentHash || base64Data)) {
+                    fetchSpatialInspection(base64Data, file.name, thresh, {
+                      documentHash: spatialData?.documentHash,
+                    });
                   }
                 }}
                 qualityThreshold={qualityThreshold}
                 setQualityThreshold={setQualityThreshold}
+                refinementStage={refinementStage}
+                conversionElapsedMs={conversionElapsedMs}
+                onKeepInstantDraft={handleKeepInstantDraft}
+                base64Data={base64Data}
               />
             </ErrorBoundary>
 

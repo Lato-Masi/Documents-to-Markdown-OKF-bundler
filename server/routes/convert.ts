@@ -1,4 +1,6 @@
 import { Router } from "express";
+import fs from "fs";
+import path from "path";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import {
@@ -8,6 +10,7 @@ import {
   generateContentStreamWithRetry,
   resolveVisionModel,
   getVisionModelDisplayName,
+  resolvePdfThinkingLevel,
   buildComplexPdfSemanticPrompt,
 } from "../utils/geminiService";
 import { extractPdfPageByPageText, inspectPdfPreflight } from "../utils/pdfUtils";
@@ -15,7 +18,11 @@ import { convertDocumentLocally, preProcessHtml, convertHtmlToMarkdownBasic, con
 import { isPandocAvailable, convertWithPandocCLI, convertHtmlToMarkdownPandoc } from "../utils/pandocEngine";
 import { convertWithAnydoc } from "../utils/anydocEngine";
 import { parsePageChunks, createSlidingWindows } from "../utils/slidingWindow";
-import { parsePdfWithLiteParse } from "../utils/liteparseEngine";
+import {
+  parsePdfWithLiteParse,
+  getCachedSpatialEntry,
+  renderPdfPageScreenshot,
+} from "../utils/liteparseEngine";
 import { extractCleanArticleHtml } from "../utils/readabilityExtractor";
 import { fetchRenderedPage } from "../utils/playwrightFetcher";
 import { discoverDomainArchitecture, parseRobotsTxt, parseLlmsTxt, parseSitemaps } from "../utils/siteDiscoveryEngine";
@@ -28,18 +35,38 @@ import { validateSafeRemoteUrl } from "../utils/urlValidator";
 
 const router = Router();
 
+const SAMPLE_POLICY_BRIEF_REL_PATH = "public/assets/aistudio/ARK-Urban-Primary-Care-NCD-Policy-Brief_f91069ba.pdf";
+
 // Endpoint: POST /api/spatial-inspect
-// Provides spatial 2D layout coordinates, bounding boxes, and quality assessment diagnostics
+// Provides spatial 2D layout coordinates, bounding boxes, quality assessment diagnostics, and SHA-256 caching
 router.post("/spatial-inspect", async (req, res) => {
   try {
-    const { fileName, fileType, base64Data, qualityThreshold } = req.body;
+    const { fileName, base64Data, qualityThreshold, documentHash, sampleId } = req.body;
+    const threshold = typeof qualityThreshold === "number" ? qualityThreshold : 75;
 
-    if (!base64Data) {
-      return res.status(400).json({ error: "No base64 document data provided" });
+    // 1. Instant lookup by SHA-256 documentHash (e.g. when user adjusts threshold slider)
+    if (documentHash && typeof documentHash === "string") {
+      const cached = getCachedSpatialEntry(documentHash, threshold);
+      if (cached) {
+        return res.json({ success: true, result: cached.result });
+      }
     }
 
-    const buffer = Buffer.from(base64Data, "base64");
-    const threshold = typeof qualityThreshold === "number" ? qualityThreshold : 75;
+    // 2. Direct local disk read for built-in sample PDF (eliminates client-to-server base64 upload roundtrip)
+    let buffer: Buffer | null = null;
+    if (sampleId === "ark-policy-brief") {
+      const fullSamplePath = path.join(process.cwd(), SAMPLE_POLICY_BRIEF_REL_PATH);
+      if (fs.existsSync(fullSamplePath)) {
+        buffer = fs.readFileSync(fullSamplePath);
+      }
+    }
+
+    if (!buffer) {
+      if (!base64Data) {
+        return res.status(400).json({ error: "No base64 document data or valid cached documentHash provided" });
+      }
+      buffer = Buffer.from(base64Data, "base64");
+    }
 
     const result = await parsePdfWithLiteParse(buffer, fileName || "document.pdf", threshold);
     return res.json({ success: true, result });
@@ -52,23 +79,103 @@ router.post("/spatial-inspect", async (req, res) => {
   }
 });
 
+// Endpoint: POST /api/pdf-page-preview
+// Renders a high-contrast PNG raster of a single PDF page via PDFium for the PDF Quality Heatmap viewer
+router.post("/pdf-page-preview", async (req, res) => {
+  try {
+    const { documentHash, pageNum = 1, base64Data, sampleId } = req.body || {};
+    let buffer: Buffer | null = null;
+
+    if (typeof documentHash === "string" && documentHash) {
+      const cached = getCachedSpatialEntry(documentHash);
+      if (cached) {
+        buffer = cached.buffer;
+      }
+    }
+
+    if (!buffer && sampleId === "ark-policy-brief") {
+      const fullSamplePath = path.join(process.cwd(), SAMPLE_POLICY_BRIEF_REL_PATH);
+      if (fs.existsSync(fullSamplePath)) {
+        buffer = fs.readFileSync(fullSamplePath);
+      }
+    }
+
+    if (!buffer && typeof base64Data === "string" && base64Data.length > 0) {
+      buffer = Buffer.from(base64Data, "base64");
+    }
+
+    if (!buffer) {
+      return res.status(400).json({
+        success: false,
+        error: "Provide a cached documentHash, sampleId, or base64Data to render PDF page preview",
+      });
+    }
+
+    const rendered = await renderPdfPageScreenshot(
+      buffer,
+      Number(pageNum) || 1,
+      typeof documentHash === "string" ? documentHash : undefined
+    );
+    if (!rendered) {
+      return res.status(500).json({
+        success: false,
+        error: "Could not render PDF page raster",
+      });
+    }
+
+    return res.json({
+      success: true,
+      pageNum: rendered.pageNum,
+      width: rendered.width,
+      height: rendered.height,
+      dataUrl: rendered.dataUrl,
+    });
+  } catch (err: any) {
+    console.error("[PDF Page Preview Error]:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to render PDF page preview",
+    });
+  }
+});
+
 // Endpoint: POST /api/convert
 router.post("/convert", async (req, res) => {
-  const { fileName, fileType, base64Data, conversionMode, targetStyle, qualityThreshold, visionModel, customApiKey } = req.body;
+  const {
+    fileName = "document.pdf",
+    fileType = "application/pdf",
+    base64Data,
+    documentHash,
+    conversionMode,
+    targetStyle,
+    qualityThreshold,
+    visionModel,
+    customApiKey,
+  } = req.body;
 
-  if (!base64Data) {
-    return res.status(400).json({ error: "No base64 file data provided" });
+  const threshold = typeof qualityThreshold === "number" ? qualityThreshold : 75;
+  const cachedSpatial = typeof documentHash === "string" ? getCachedSpatialEntry(documentHash, threshold) : null;
+
+  if (!base64Data && !cachedSpatial) {
+    return res.status(400).json({ error: "No base64 file data or cached documentHash provided" });
   }
 
+  const resolvedBase64Data: string = base64Data || cachedSpatial!.buffer.toString("base64");
+
   const headerKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
-  const threshold = typeof qualityThreshold === "number" ? qualityThreshold : 75;
   const selectedVisionModel = resolveVisionModel(visionModel);
   const modelLabel = getVisionModelDisplayName(selectedVisionModel);
+  const pdfThinkingLevel = resolvePdfThinkingLevel(selectedVisionModel, conversionMode);
   const apiKey = getGeminiApiKey(headerKey);
 
-  // If GEMINI_API_KEY is not set, convert locally directly
+  // If GEMINI_API_KEY is not set, return cached 2D spatial markdown or convert locally directly
   if (!apiKey) {
-    const localResult = await convertDocumentLocally(fileName, fileType, base64Data);
+    if (cachedSpatial?.result?.markdown) {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.write(cachedSpatial.result.markdown);
+      return res.end();
+    }
+    const localResult = await convertDocumentLocally(fileName, fileType, resolvedBase64Data);
     if (localResult !== null) {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.write(localResult);
@@ -154,24 +261,27 @@ Conversion Requirements:
       }
     };
 
-    // 1. PDF Files - Phase 1 LiteParse Spatial Extraction & Layout-Aware Quality Escalation
+    // 1. PDF Files - Phase 1 LiteParse Spatial Extraction (SHA-256 Cached) & Layout-Aware Quality Escalation
     if (fileType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf")) {
-      res.write(`> 🛰️ [Server Stage 1/3] LiteParse Spatial Engine inspecting ${fileName} (Quality Threshold: ${threshold}/100, Vision Model: ${modelLabel})...\n\n`);
+      res.write(`> 🛰️ [Server Stage 1/3] LiteParse Spatial Engine inspecting ${fileName} (Threshold: ${threshold}/100, Model: ${modelLabel}, Thinking: ${pdfThinkingLevel})...\n\n`);
 
-      const buffer = Buffer.from(base64Data, "base64");
-
-      // Execute LiteParse Spatial Grid Extraction
-      const liteParseResult = await parsePdfWithLiteParse(buffer, fileName, threshold);
-      const { quality, totalPages, pages, markdown: liteParseMd, rawText } = liteParseResult;
+      // Reuse pre-flight SHA-256 cached spatial extraction in <1ms when available
+      const liteParseResult = cachedSpatial
+        ? cachedSpatial.result
+        : await parsePdfWithLiteParse(Buffer.from(resolvedBase64Data, "base64"), fileName, threshold);
+      const { quality, totalPages, pages, markdown: liteParseMd, rawText, cacheHit } = liteParseResult;
 
       const totalPagesCount = totalPages;
-      const pdfTextReference = rawText || pages.map(p => p.text).join("\n\n");
+      const pdfTextReference = rawText || pages.map((p) => p.text).join("\n\n");
       const structuredMarkdown = liteParseMd;
 
-      res.write(`> 🛰️ [Server Stage 2/3] LiteParse Spatial Quality Score: ${quality.qualityScore}/100 (${quality.isSatisfactory ? "Linear Single-Column" : "Multimodal Vision Required"} - ${quality.reasons.join("; ")}).\n\n`);
+      res.write(
+        `> 🛰️ [Server Stage 2/3] Spatial Score: ${quality.qualityScore}/100 (${
+          cacheHit ? "SHA-256 Cache Hit <1ms" : `${liteParseResult.executionTimeMs}ms`
+        } · ${quality.isSatisfactory ? "Linear Single-Column" : "Multimodal Vision Required"}).\n\n`
+      );
 
       // DETERMINISTIC FAST-PATH EVALUATION:
-      // Only take local fast-path if explicitly requested via "text-only" OR if the layout is simple single-column with no charts/sidebars and not in "rich" mode
       const shouldTakeFastPath =
         conversionMode === "text-only" ||
         (conversionMode !== "rich" &&
@@ -191,14 +301,13 @@ Conversion Requirements:
         return res.end();
       }
 
-      // ESCALATION TO GEMINI MULTIMODAL VISION (Gemini 3.8 Flash default or Gemini 4 Pro):
-      // Triggered on multi-column grids, embedded charts, callout sidebars, rich mode, or quality score < threshold
-      res.write(`> ⚠️ **Multimodal Layout Escalation Activated**: ${quality.reasons.join(" | ")}. Escalating to ${modelLabel} multimodal vision engine for semantic relationship & chart reconstruction...\n\n`);
+      // ESCALATION TO GEMINI MULTIMODAL VISION:
+      res.write(`> ⚠️ **Multimodal Layout Escalation Activated**: ${quality.reasons.join(" | ")}. Refining with ${modelLabel} (${pdfThinkingLevel} thinking)...\n\n`);
 
       const pdfDocPart = {
         inlineData: {
           mimeType: "application/pdf",
-          data: base64Data,
+          data: resolvedBase64Data,
         },
       };
 
@@ -253,6 +362,11 @@ ${win.pagesText}
                 contents: {
                   parts: [pdfDocPart, { text: windowPrompt }],
                 },
+                config: {
+                  thinkingConfig: {
+                    thinkingLevel: pdfThinkingLevel,
+                  },
+                },
               },
               4,
               onRetry
@@ -281,8 +395,8 @@ ${win.pagesText}
         return res.end();
       }
 
-      // Branch B: Standard Documents (<= 4 pages, including 2-page Policy Briefs) -> Full Multimodal Semantic Reconstruction
-      res.write(`> 🧬 **Phase 2B Multimodal Semantic Pipeline Activated (${modelLabel})**: Reconstructing ${quality.detectedColumns}-column hierarchy, cross-column sections, embedded chart tables, and attributed quotes...\n\n`);
+      // Branch B: Standard Documents (<= 4 pages, including 2-page Policy Briefs) -> Fast Multimodal Visual Refinement
+      res.write(`> 🧬 **Phase 2B Multimodal Visual Refinement (${modelLabel})**: Verifying ${quality.detectedColumns}-column hierarchy, chart tables, and speaker attributions...\n\n`);
 
       const pdfPrompt = buildComplexPdfSemanticPrompt({
         fileName,
@@ -294,11 +408,10 @@ ${win.pagesText}
         modeInstructions,
         styleInstructions,
         structuredMarkdown,
-        pdfTextReference,
       });
 
       try {
-        startHeartbeat(`Awaiting ${modelLabel} multimodal vision inference for ${fileName}`);
+        startHeartbeat(`Awaiting ${modelLabel} multimodal vision refinement for ${fileName}`);
 
         const responseStream = await generateContentStreamWithRetry(
           ai,
@@ -306,6 +419,11 @@ ${win.pagesText}
             model: selectedVisionModel,
             contents: {
               parts: [pdfDocPart, { text: pdfPrompt }],
+            },
+            config: {
+              thinkingConfig: {
+                thinkingLevel: pdfThinkingLevel,
+              },
             },
           },
           4,

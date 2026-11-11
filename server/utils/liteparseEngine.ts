@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import {
   reconstructPdfMarkdownFromSpatialPages,
   sanitizePdfTextArtifacts,
@@ -39,6 +40,10 @@ export interface SpatialTextItem {
   fontName?: string;
   fontSize?: number;
   rotation?: number;
+  confidence?: number;
+  ocrConfidence?: number;
+  fontIsBuggy?: boolean;
+  confidenceReasons?: string[];
   words?: SpatialWord[];
 }
 
@@ -84,7 +89,178 @@ export interface LiteParseExtractionResult {
   rawText: string;
   quality: SpatialQualityMetrics;
   executionTimeMs: number;
+  documentHash?: string;
+  cacheHit?: boolean;
   error?: string;
+}
+
+interface SpatialCacheEntry {
+  documentHash: string;
+  buffer: Buffer;
+  baseResult: LiteParseExtractionResult;
+  cachedAt: number;
+}
+
+const MAX_SPATIAL_CACHE_ENTRIES = 25;
+const SPATIAL_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const spatialLruCache = new Map<string, SpatialCacheEntry>();
+
+function adaptCachedResultForThreshold(
+  baseResult: LiteParseExtractionResult,
+  qualityThreshold: number,
+  documentHash: string,
+  executionTimeMs: number,
+  cacheHit: boolean
+): LiteParseExtractionResult {
+  const q = baseResult.quality;
+  const requiresMultimodalVision =
+    q.detectedColumns >= 2 ||
+    Boolean(q.hasEmbeddedCharts) ||
+    Boolean(q.hasComplexSemantics) ||
+    q.qualityScore < qualityThreshold;
+  const isSatisfactory = !requiresMultimodalVision && q.qualityScore >= qualityThreshold;
+
+  return {
+    ...baseResult,
+    documentHash,
+    cacheHit,
+    executionTimeMs,
+    quality: {
+      ...q,
+      threshold: qualityThreshold,
+      requiresMultimodalVision,
+      isSatisfactory,
+      decision: isSatisfactory ? "FAST_LOCAL_DETERMINISTIC" : "ESCALATED_TO_GEMINI_MULTIMODAL",
+    },
+  };
+}
+
+/**
+ * Retrieves a previously parsed PDF buffer and 2D spatial extraction result by SHA-256 digest in <1ms.
+ */
+export function getCachedSpatialEntry(
+  documentHash?: string,
+  qualityThreshold: number = 75
+): { buffer: Buffer; result: LiteParseExtractionResult } | null {
+  if (!documentHash) return null;
+  const entry = spatialLruCache.get(documentHash);
+  if (!entry) return null;
+
+  if (Date.now() - entry.cachedAt > SPATIAL_CACHE_TTL_MS) {
+    spatialLruCache.delete(documentHash);
+    return null;
+  }
+
+  // Refresh LRU order
+  spatialLruCache.delete(documentHash);
+  entry.cachedAt = Date.now();
+  spatialLruCache.set(documentHash, entry);
+
+  return {
+    buffer: entry.buffer,
+    result: adaptCachedResultForThreshold(entry.baseResult, qualityThreshold, documentHash, 0, true),
+  };
+}
+
+function storeSpatialCacheEntry(
+  documentHash: string,
+  buffer: Buffer,
+  result: LiteParseExtractionResult
+): void {
+  if (spatialLruCache.has(documentHash)) {
+    spatialLruCache.delete(documentHash);
+  } else if (spatialLruCache.size >= MAX_SPATIAL_CACHE_ENTRIES) {
+    const oldestKey = spatialLruCache.keys().next().value;
+    if (oldestKey) {
+      spatialLruCache.delete(oldestKey);
+    }
+  }
+  spatialLruCache.set(documentHash, {
+    documentHash,
+    buffer,
+    baseResult: result,
+    cachedAt: Date.now(),
+  });
+}
+
+interface PageScreenshotCacheEntry {
+  pageNum: number;
+  width: number;
+  height: number;
+  dataUrl: string;
+  cachedAt: number;
+}
+
+const MAX_PAGE_SCREENSHOT_ENTRIES = 40;
+const pageScreenshotCache = new Map<string, PageScreenshotCacheEntry>();
+
+/**
+ * Renders a single 1-indexed PDF page to a base64 PNG data URL using PDFium (`LiteParse.screenshot`)
+ * with SHA-256 + pageNum LRU caching for instant heatmap backdrop rendering.
+ */
+export async function renderPdfPageScreenshot(
+  buffer: Buffer,
+  pageNum: number = 1,
+  documentHash?: string
+): Promise<{ pageNum: number; width: number; height: number; dataUrl: string } | null> {
+  const safePageNum = Math.max(1, Math.floor(pageNum || 1));
+  const hash = documentHash || crypto.createHash("sha256").update(buffer).digest("hex");
+  const cacheKey = `${hash}:p${safePageNum}`;
+
+  const existing = pageScreenshotCache.get(cacheKey);
+  if (existing && Date.now() - existing.cachedAt <= SPATIAL_CACHE_TTL_MS) {
+    pageScreenshotCache.delete(cacheKey);
+    existing.cachedAt = Date.now();
+    pageScreenshotCache.set(cacheKey, existing);
+    return {
+      pageNum: existing.pageNum,
+      width: existing.width,
+      height: existing.height,
+      dataUrl: existing.dataUrl,
+    };
+  }
+
+  try {
+    const LiteParse = await getLiteParseClass();
+    if (!LiteParse) return null;
+
+    const lp = new LiteParse({
+      dpi: 110,
+      quiet: true,
+    });
+    const shots = await lp.screenshot(buffer, [safePageNum]);
+    const shot = Array.isArray(shots) ? shots[0] : null;
+    if (!shot || !shot.imageBuffer) return null;
+
+    const imgBuf = Buffer.isBuffer(shot.imageBuffer)
+      ? shot.imageBuffer
+      : Buffer.from(shot.imageBuffer);
+    const dataUrl = `data:image/png;base64,${imgBuf.toString("base64")}`;
+
+    if (pageScreenshotCache.size >= MAX_PAGE_SCREENSHOT_ENTRIES) {
+      const oldest = pageScreenshotCache.keys().next().value;
+      if (oldest) pageScreenshotCache.delete(oldest);
+    }
+
+    const entry: PageScreenshotCacheEntry = {
+      pageNum: shot.pageNum || safePageNum,
+      width: Number(shot.width) || 612,
+      height: Number(shot.height) || 792,
+      dataUrl,
+      cachedAt: Date.now(),
+    };
+    pageScreenshotCache.set(cacheKey, entry);
+
+    return {
+      pageNum: entry.pageNum,
+      width: entry.width,
+      height: entry.height,
+      dataUrl: entry.dataUrl,
+    };
+  } catch (err) {
+    console.warn("[LiteParse Screenshot Notice]:", err);
+    return null;
+  }
 }
 
 // Simple English / Latin syllable / lexical heuristic checker for OCR noise
@@ -166,6 +342,16 @@ export async function parsePdfWithLiteParse(
   qualityThreshold: number = 75
 ): Promise<LiteParseExtractionResult> {
   const startTime = Date.now();
+  const documentHash = crypto.createHash("sha256").update(buffer).digest("hex");
+
+  // 0. Instant SHA-256 LRU Cache Check (<1ms)
+  const cached = getCachedSpatialEntry(documentHash, qualityThreshold);
+  if (cached) {
+    return {
+      ...cached.result,
+      executionTimeMs: Date.now() - startTime,
+    };
+  }
 
   try {
     const LiteParse = await getLiteParseClass();
@@ -178,6 +364,7 @@ export async function parsePdfWithLiteParse(
       outputFormat: "json",
       emitWordBoxes: true,
       extractContentBounds: true,
+      extractTextMetadata: true,
       ocrEnabled: false,
       extractLinks: true,
     });
@@ -204,6 +391,7 @@ export async function parsePdfWithLiteParse(
         outputFormat: "json",
         emitWordBoxes: true,
         extractContentBounds: true,
+        extractTextMetadata: true,
         ocrEnabled: true,
         extractLinks: true,
       });
@@ -350,6 +538,10 @@ export async function parsePdfWithLiteParse(
               fontName: item.fontName || "Helvetica",
               fontSize: Number(item.fontSize) || 12,
               rotation: Number(item.rotation) || 0,
+              ...(typeof item.confidence === "number"
+                ? { ocrConfidence: item.confidence }
+                : {}),
+              ...(item.fontIsBuggy ? { fontIsBuggy: true } : {}),
               words: cleanWords,
             });
           }
@@ -541,7 +733,7 @@ export async function parsePdfWithLiteParse(
       reasons,
     };
 
-    return {
+    const finalResult: LiteParseExtractionResult = {
       success: true,
       totalPages,
       pages,
@@ -549,7 +741,13 @@ export async function parsePdfWithLiteParse(
       rawText: combinedRawText,
       quality,
       executionTimeMs: Date.now() - startTime,
+      documentHash,
+      cacheHit: false,
     };
+
+    storeSpatialCacheEntry(documentHash, buffer, finalResult);
+
+    return finalResult;
   } catch (err: any) {
     console.error("[LiteParse Engine Error]:", err);
     return {
