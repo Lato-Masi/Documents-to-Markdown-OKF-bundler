@@ -1,12 +1,14 @@
 import { Router } from "express";
-import { GoogleGenAI } from "@google/genai";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import {
+  createGeminiClient,
   getGeminiApiKey,
   getFriendlyErrorMessage,
   generateContentStreamWithRetry,
-  generateContentWithRetry
+  resolveVisionModel,
+  getVisionModelDisplayName,
+  buildComplexPdfSemanticPrompt,
 } from "../utils/geminiService";
 import { extractPdfPageByPageText, inspectPdfPreflight } from "../utils/pdfUtils";
 import { convertDocumentLocally, preProcessHtml, convertHtmlToMarkdownBasic, convertCsvToMarkdownTable } from "../utils/localConverter";
@@ -52,7 +54,7 @@ router.post("/spatial-inspect", async (req, res) => {
 
 // Endpoint: POST /api/convert
 router.post("/convert", async (req, res) => {
-  const { fileName, fileType, base64Data, conversionMode, targetStyle, qualityThreshold, customApiKey } = req.body;
+  const { fileName, fileType, base64Data, conversionMode, targetStyle, qualityThreshold, visionModel, customApiKey } = req.body;
 
   if (!base64Data) {
     return res.status(400).json({ error: "No base64 file data provided" });
@@ -60,6 +62,8 @@ router.post("/convert", async (req, res) => {
 
   const headerKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
   const threshold = typeof qualityThreshold === "number" ? qualityThreshold : 75;
+  const selectedVisionModel = resolveVisionModel(visionModel);
+  const modelLabel = getVisionModelDisplayName(selectedVisionModel);
   const apiKey = getGeminiApiKey(headerKey);
 
   // If GEMINI_API_KEY is not set, convert locally directly
@@ -75,7 +79,7 @@ router.post("/convert", async (req, res) => {
     });
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = createGeminiClient(apiKey);
 
   let modeInstructions = "";
   if (conversionMode === "rich") {
@@ -83,7 +87,7 @@ router.post("/convert", async (req, res) => {
   } else if (conversionMode === "text-only") {
     modeInstructions = "Focus strictly on extractable text content, omitting visual layouts or decorative figures.";
   } else {
-    modeInstructions = "Standard faithful document conversion preserve structural accuracy.";
+    modeInstructions = "Standard faithful document conversion preserving full structural and semantic accuracy.";
   }
 
   let styleInstructions = "";
@@ -105,8 +109,8 @@ Conversion Requirements:
 2. ${modeInstructions}
 3. ${styleInstructions}
 4. Maintain original logical hierarchies, headings (use appropriate #, ##, ### levels), bullet points, and numbered lists.
-5. If the source contains tables, format them properly in clean Markdown tables with aligned columns.
-6. If the source contains images with text or diagrams, attempt to describe them or extract their textual details in blockquotes or captions.
+5. If the source contains tables or visual charts, format them properly in clean Markdown tables with aligned columns.
+6. If the source contains images with text, quotes, or diagrams, extract their full details in blockquotes or tables.
 7. Return ONLY the final converted Markdown text. DO NOT wrap your entire output in backticks (e.g., do not start with \`\`\`markdown and end with \`\`\`), do not include any explanatory text, greetings, notes, or chat conversational phrasing. Output just the raw Markdown content directly.`;
 
   try {
@@ -150,9 +154,9 @@ Conversion Requirements:
       }
     };
 
-    // 1. PDF Files - Phase 1 LiteParse Spatial Extraction & Quality Assessment Threshold
+    // 1. PDF Files - Phase 1 LiteParse Spatial Extraction & Layout-Aware Quality Escalation
     if (fileType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf")) {
-      res.write(`> 🛰️ [Server Stage 1/3] LiteParse Spatial Engine inspecting ${fileName} (Quality Threshold: ${threshold}/100)...\n\n`);
+      res.write(`> 🛰️ [Server Stage 1/3] LiteParse Spatial Engine inspecting ${fileName} (Quality Threshold: ${threshold}/100, Vision Model: ${modelLabel})...\n\n`);
 
       const buffer = Buffer.from(base64Data, "base64");
 
@@ -164,23 +168,32 @@ Conversion Requirements:
       const pdfTextReference = rawText || pages.map(p => p.text).join("\n\n");
       const structuredMarkdown = liteParseMd;
 
-      res.write(`> 🛰️ [Server Stage 2/3] LiteParse Spatial Quality Score: ${quality.qualityScore}/100 (${quality.isSatisfactory ? "Satisfactory" : "Below Threshold"} - ${quality.reasons.join("; ")}).\n\n`);
+      res.write(`> 🛰️ [Server Stage 2/3] LiteParse Spatial Quality Score: ${quality.qualityScore}/100 (${quality.isSatisfactory ? "Linear Single-Column" : "Multimodal Vision Required"} - ${quality.reasons.join("; ")}).\n\n`);
 
       // DETERMINISTIC FAST-PATH EVALUATION:
-      // If quality is satisfactory (score >= threshold) OR user selected text-only conversion
+      // Only take local fast-path if explicitly requested via "text-only" OR if the layout is simple single-column with no charts/sidebars and not in "rich" mode
+      const shouldTakeFastPath =
+        conversionMode === "text-only" ||
+        (conversionMode !== "rich" &&
+          quality.isSatisfactory &&
+          !quality.requiresMultimodalVision &&
+          quality.detectedColumns < 2 &&
+          !quality.hasEmbeddedCharts &&
+          !quality.hasComplexSemantics);
+
       if (
-        (quality.isSatisfactory || conversionMode === "text-only") &&
+        shouldTakeFastPath &&
         structuredMarkdown &&
         structuredMarkdown.trim().length > 30
       ) {
-        res.write(`> ⚡ **LiteParse Fast-Path Executed**: High-fidelity local spatial parsing complete (${quality.detectedColumns} detected columns, ${quality.wordCount} words, ${liteParseResult.executionTimeMs}ms)\n\n`);
+        res.write(`> ⚡ **LiteParse Fast-Path Executed**: Clean single-column spatial parsing complete (${quality.wordCount} words, ${liteParseResult.executionTimeMs}ms)\n\n`);
         res.write(structuredMarkdown);
         return res.end();
       }
 
-      // ESCALATION TO GEMINI 3.6 FLASH:
-      // Triggered if quality score < threshold or complex multimodal visual layout detected
-      res.write(`> ⚠️ **Quality Escalation Protocol Activated**: Local score ${quality.qualityScore}/100 below threshold ${threshold}/100 (${quality.reasons[0]}). Escalating to Gemini 3.6 Flash multimodal engine with spatial grounding anchor...\n\n`);
+      // ESCALATION TO GEMINI MULTIMODAL VISION (Gemini 3.8 Flash default or Gemini 4 Pro):
+      // Triggered on multi-column grids, embedded charts, callout sidebars, rich mode, or quality score < threshold
+      res.write(`> ⚠️ **Multimodal Layout Escalation Activated**: ${quality.reasons.join(" | ")}. Escalating to ${modelLabel} multimodal vision engine for semantic relationship & chart reconstruction...\n\n`);
 
       const pdfDocPart = {
         inlineData: {
@@ -195,20 +208,21 @@ Conversion Requirements:
 
       // Branch A: Multi-Page Documents (> 4 pages) -> Multi-Window Sliding Pipeline
       if (totalPagesCount > 4 && slidingWindows.length > 1) {
-        res.write(`> 🧬 **Phase 2B Multimodal Hybrid Pipeline Activated** (${totalPagesCount} Pages -> ${slidingWindows.length} Overlapping 4-Page Windows)\n`);
-        res.write(`> 🪟 **Sliding Window Engine**: Processing in 4-page windows to guarantee sub-3-second streaming latency and eliminate truncation.\n\n`);
+        res.write(`> 🧬 **Phase 2B Multimodal Hybrid Pipeline Activated** (${totalPagesCount} Pages -> ${slidingWindows.length} Overlapping 4-Page Windows via ${modelLabel})\n`);
+        res.write(`> 🪟 **Sliding Window Engine**: Processing in 4-page windows to preserve cross-page tables and semantic continuity.\n\n`);
 
         let previousTailContext = "";
 
         for (const win of slidingWindows) {
-          res.write(`> 🪟 [Window ${win.windowIndex + 1}/${win.totalWindows}] Processing Pages ${win.startPage}–${win.endPage}...\n\n`);
+          res.write(`> 🪟 [Window ${win.windowIndex + 1}/${win.totalWindows}] Processing Pages ${win.startPage}–${win.endPage} with ${modelLabel}...\n\n`);
 
           const windowPrompt = `You are converting Pages ${win.startPage} to ${win.endPage} of a ${totalPagesCount}-page PDF document (Window ${win.windowIndex + 1}/${win.totalWindows}).
-Your objective is to extract these pages into clean, accurate, loss-free Markdown.
+Your objective is to visually inspect these pages and extract them into clean, accurate, semantically structured Markdown.
 
 FILE NAME: ${fileName}
 WINDOW RANGE: Pages ${win.startPage} through ${win.endPage} of ${totalPagesCount}
 LITEPARSE QUALITY SCORE: ${quality.qualityScore}/100
+DETECTED SIGNALS: ${quality.reasons.join("; ")}
 
 ${previousTailContext ? `CONTINUITY CONTEXT FROM PREVIOUS WINDOW (Do NOT duplicate headers or completed tables):
 --- PREVIOUS TAIL ANCHOR ---
@@ -216,10 +230,11 @@ ${previousTailContext}
 --- END PREVIOUS TAIL ANCHOR ---
 ` : ""}
 
-UNIVERSAL EXTRACTION PROTOCOL:
-1. Reconstruct reading order faithfully (main text, sidebars, multi-column tables).
-2. If a table started in the previous window and continues onto these pages, append rows cleanly to the table structure.
-3. Output raw Markdown directly without wrapping in \`\`\`markdown code blocks.
+SEMANTIC EXTRACTION PROTOCOL:
+1. Reconstruct visual reading order faithfully (unwrap multi-column grids, stitch paragraphs that split across columns, and keep callout sidebars intact).
+2. Convert any embedded bar/line charts or figures into aligned GitHub-Flavored Markdown (GFM) tables with all data values and percentages.
+3. Format verbatim participant quotes as attributed blockquotes (\`> *"..."* — **[Speaker Role]**\`) under their thematic sub-heading.
+4. Output raw Markdown directly without wrapping in \`\`\`markdown code blocks.
 
 ${modeInstructions}
 ${styleInstructions}
@@ -229,12 +244,12 @@ ${win.pagesText}
 --- END WINDOW MANIFEST ---`;
 
           try {
-            startHeartbeat(`Awaiting Gemini 3.6 Flash inference for Window ${win.windowIndex + 1}/${win.totalWindows} (Pages ${win.startPage}-${win.endPage})`);
+            startHeartbeat(`Awaiting ${modelLabel} inference for Window ${win.windowIndex + 1}/${win.totalWindows} (Pages ${win.startPage}-${win.endPage})`);
 
             const windowStream = await generateContentStreamWithRetry(
               ai,
               {
-                model: "gemini-3.6-flash",
+                model: selectedVisionModel,
                 contents: {
                   parts: [pdfDocPart, { text: windowPrompt }],
                 },
@@ -266,46 +281,29 @@ ${win.pagesText}
         return res.end();
       }
 
-      // Branch B: Standard Short Documents (<= 4 pages) -> Full Single-Pass Multimodal Pipeline
-      res.write(`> 🧬 **Phase 2B Multimodal Hybrid Pipeline Activated**: Triggered by LiteParse Quality Assessment (Score: ${quality.qualityScore}/100, Threshold: ${threshold}/100 - ${quality.reasons.join("; ")})\n\n`);
+      // Branch B: Standard Documents (<= 4 pages, including 2-page Policy Briefs) -> Full Multimodal Semantic Reconstruction
+      res.write(`> 🧬 **Phase 2B Multimodal Semantic Pipeline Activated (${modelLabel})**: Reconstructing ${quality.detectedColumns}-column hierarchy, cross-column sections, embedded chart tables, and attributed quotes...\n\n`);
 
-      const pageInfoPrompt = totalPagesCount > 0 
-        ? `CRITICAL MANDATE: THIS PDF CONTAINS EXACTLY ${totalPagesCount} TOTAL PAGES.` 
-        : `CRITICAL MANDATE: THIS IS A MULTI-PAGE PDF DOCUMENT.`;
-
-      const pdfPrompt = `You are an advanced visual document-to-Markdown parser operating as the Phase 2B Multimodal Engine in a hybrid architecture.
-Your objective is to perform a COMPLETE, LOSS-FREE, FULL-LENGTH conversion of this entire PDF document into clean, beautifully formatted Markdown.
-
-FILE NAME: ${fileName}
-${pageInfoPrompt}
-LITEPARSE SPATIAL QUALITY SCORE: ${quality.qualityScore}/100 (Threshold: ${threshold}/100)
-LAYOUT COMPLEXITY SIGNALS: ${quality.reasons.join("; ")}
-
-UNIVERSAL HYBRID EXTRACTION PROTOCOL:
-
-1. VISUAL LAYOUT & MULTI-COLUMN UNWRAPPING:
-   - Identify multi-column layouts (${quality.detectedColumns} detected), sidebars, margin callout cards, headers, footers, and complex nested table grids.
-   - Reconstruct reading order faithfully (main narrative column -> secondary sidebar -> inline callouts).
-2. MATHEMATICAL & LATEX NOTATION:
-   - Render all inline math expressions as $...$ and display equations as $$...$$.
-3. EXHAUSTIVE PAGE COVERAGE:
-   - Iterate page by page from Page 1 through Page ${totalPagesCount || 'N'}.
-   - Do NOT truncate, summarize, or skip any page or section.
-4. STRICT OUTPUT FORMATTING:
-   - Output raw Markdown directly without starting or ending code fences (\`\`\`markdown).
-
-${modeInstructions}
-${styleInstructions}
-
-${structuredMarkdown ? `Below is the deterministic spatial text & structural anchor extracted via Phase 1 LiteParse across all ${totalPagesCount} pages to ground your multimodal vision:\n\n--- DETERMINISTIC SPATIAL STRUCTURAL ANCHOR ---\n${structuredMarkdown}\n--- END STRUCTURAL ANCHOR ---\n\n` : ''}${pdfTextReference ? `Below is the raw page-by-page text manifest across all ${totalPagesCount} pages:\n\n--- EXTRACTED PAGE MANIFEST (${totalPagesCount} PAGES) ---\n${pdfTextReference}\n--- END MANIFEST ---` : ''}`;
+      const pdfPrompt = buildComplexPdfSemanticPrompt({
+        fileName,
+        totalPages: totalPagesCount,
+        qualityScore: quality.qualityScore,
+        threshold,
+        detectedColumns: quality.detectedColumns,
+        reasons: quality.reasons,
+        modeInstructions,
+        styleInstructions,
+        structuredMarkdown,
+        pdfTextReference,
+      });
 
       try {
-        startHeartbeat(`Awaiting Gemini 3.6 Flash multimodal vision inference for ${fileName}`);
+        startHeartbeat(`Awaiting ${modelLabel} multimodal vision inference for ${fileName}`);
 
         const responseStream = await generateContentStreamWithRetry(
           ai,
           {
-            model: "gemini-3.6-flash",
+            model: selectedVisionModel,
             contents: {
               parts: [pdfDocPart, { text: pdfPrompt }],
             },
@@ -348,7 +346,7 @@ ${structuredMarkdown ? `Below is the deterministic spatial text & structural anc
       const responseStream = await generateContentStreamWithRetry(
         ai,
         {
-          model: "gemini-3.6-flash",
+          model: selectedVisionModel,
           contents: {
             parts: [docPart, { text: prompt }],
           },
@@ -446,12 +444,12 @@ ${structuredMarkdown ? `Below is the deterministic spatial text & structural anc
 
       // FAILOVER TO DEEPER GEMINI ANALYSIS IF DETERMINISTIC STEPS FAIL
       console.warn(`[Pipeline Fallback Switch] Local document extraction step failed (${extractErrorReason}). Triggering deeper Gemini analysis.`);
-      res.write(`> ⚠️ **Pipeline Fallback Switch**: Local deterministic engine encountered an encrypted or complex layout (${extractErrorReason || "Non-standard document encoding"}). Automatically switched to Gemini 3.6 Flash multimodal analysis...\n\n`);
+      res.write(`> ⚠️ **Pipeline Fallback Switch**: Local deterministic engine encountered an encrypted or complex layout (${extractErrorReason || "Non-standard document encoding"}). Automatically switched to ${modelLabel} multimodal analysis...\n\n`);
 
       const responseStream = await generateContentStreamWithRetry(
         ai,
         {
-          model: "gemini-3.6-flash",
+          model: selectedVisionModel,
           contents: [
             {
               text: `${prompt}\n\nNote: Local deterministic parsing encountered a layout limit (${extractErrorReason}). Perform an exhaustive visual and structural extraction directly from the document provided.`,
@@ -537,12 +535,12 @@ ${structuredMarkdown ? `Below is the deterministic spatial text & structural anc
         return res.end();
       }
 
-      res.write(`> ⚠️ **Pipeline Fallback Switch**: Local sheet parser encountered a complex or encoded spreadsheet structure. Automatically switched to Gemini 3.6 Flash multimodal analysis...\n\n`);
+      res.write(`> ⚠️ **Pipeline Fallback Switch**: Local sheet parser encountered a complex or encoded spreadsheet structure. Automatically switched to ${modelLabel} multimodal analysis...\n\n`);
 
       const responseStream = await generateContentStreamWithRetry(
         ai,
         {
-          model: "gemini-3.6-flash",
+          model: selectedVisionModel,
           contents: [
             {
               text: `${prompt}\n\nPerform a comprehensive tabular data extraction directly from the raw spreadsheet file provided.`,
@@ -600,12 +598,12 @@ ${structuredMarkdown ? `Below is the deterministic spatial text & structural anc
         return res.end();
       }
 
-      res.write(`> ⚠️ **Pipeline Fallback Switch**: Deterministic HTML conversion encountered a layout constraint. Switched to Gemini 3.6 Flash analysis...\n\n`);
+      res.write(`> ⚠️ **Pipeline Fallback Switch**: Deterministic HTML conversion encountered a layout constraint. Switched to ${modelLabel} analysis...\n\n`);
 
       const responseStream = await generateContentStreamWithRetry(
         ai,
         {
-          model: "gemini-3.6-flash",
+          model: selectedVisionModel,
           contents: [
             {
               text: `${prompt}\n\nPerform a deep structural extraction from the cleaned article HTML below:\n\n--- HTML SOURCE ---\n${readability.cleanedHtml}\n--- END HTML SOURCE ---`,
@@ -662,12 +660,14 @@ function isSafeUrlForFetching(rawUrl: string): { safe: boolean; reason?: string;
 
 // Endpoint: POST /api/fetch-url
 router.post("/fetch-url", async (req, res) => {
-  const { url, conversionMode, targetStyle, qualityThreshold, customApiKey } = req.body;
+  const { url, conversionMode, targetStyle, qualityThreshold, visionModel, customApiKey } = req.body;
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Please provide a valid URL" });
   }
 
   const headerKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
+  const selectedVisionModel = resolveVisionModel(visionModel);
+  const modelLabel = getVisionModelDisplayName(selectedVisionModel);
 
   const urlCheck = isSafeUrlForFetching(url);
   if (!urlCheck.safe || !urlCheck.parsedUrl) {
@@ -761,6 +761,50 @@ router.post("/fetch-url", async (req, res) => {
 
       res.write(`> 📄 **Downloaded**: ${(buffer.length / 1024).toFixed(1)} KB. Processing through document conversion engine...\n\n`);
 
+      // Gemini Vision/Document synthesis first for PDFs when key is available and layout is complex
+      const apiKey = getGeminiApiKey(headerKey);
+      if (detectedContentType === "application/pdf" && apiKey) {
+        const liteRes = await parsePdfWithLiteParse(buffer, fileName, typeof qualityThreshold === "number" ? qualityThreshold : 75);
+        if (!liteRes.quality.requiresMultimodalVision && liteRes.markdown && liteRes.markdown.trim().length > 30) {
+          res.write(liteRes.markdown);
+          return res.end();
+        }
+        res.write(`> 🧠 **AI Document Vision Engine (${modelLabel})**: Reconstructing complex PDF layout and charts...\n\n`);
+        const ai = createGeminiClient(apiKey);
+        const pdfPrompt = buildComplexPdfSemanticPrompt({
+          fileName,
+          totalPages: liteRes.totalPages,
+          qualityScore: liteRes.quality.qualityScore,
+          threshold: typeof qualityThreshold === "number" ? qualityThreshold : 75,
+          detectedColumns: liteRes.quality.detectedColumns,
+          reasons: liteRes.quality.reasons,
+          modeInstructions: "Include high-detail structural extraction, tables, and chart digitization.",
+          styleInstructions: "Format as GitHub Flavored Markdown (GFM).",
+          structuredMarkdown: liteRes.markdown,
+          pdfTextReference: liteRes.rawText,
+        });
+        const responseStream = await generateContentStreamWithRetry(
+          ai,
+          {
+            model: selectedVisionModel,
+            contents: [
+              {
+                inlineData: {
+                  mimeType: "application/pdf",
+                  data: base64Data,
+                },
+              },
+              { text: pdfPrompt },
+            ],
+          },
+          3
+        );
+        for await (const chunk of responseStream) {
+          res.write(chunk.text || "");
+        }
+        return res.end();
+      }
+
       // Try local deterministic converter (liteparse / pdf-parse / mammoth / xlsx)
       const localConverted = await convertDocumentLocally(fileName, detectedContentType, base64Data);
       if (localConverted && localConverted.trim().length > 0) {
@@ -768,15 +812,13 @@ router.post("/fetch-url", async (req, res) => {
         return res.end();
       }
 
-      // Gemini Vision/Document synthesis fallback if local parse is insufficient
-      const apiKey = getGeminiApiKey(headerKey);
       if (apiKey) {
-        res.write(`> 🧠 **AI Document Vision Engine**: Processing document through Gemini 3.6 Flash...\n\n`);
-        const ai = new GoogleGenAI({ apiKey });
+        res.write(`> 🧠 **AI Document Vision Engine**: Processing document through ${modelLabel}...\n\n`);
+        const ai = createGeminiClient(apiKey);
         const responseStream = await generateContentStreamWithRetry(
           ai,
           {
-            model: "gemini-3.6-flash",
+            model: selectedVisionModel,
             contents: [
               {
                 text: `Convert this document into pristine, well-structured Markdown. Preserve tables, headers, lists, and data formatting. Source: ${url}`,
@@ -866,12 +908,12 @@ router.post("/fetch-url", async (req, res) => {
     // Fallback to Gemini if deterministic reader yielded empty content
     const apiKey = getGeminiApiKey(headerKey);
     if (apiKey) {
-      res.write(`> ⚠️ **Pipeline Fallback Switch**: Running Gemini 3.6 Flash layout synthesis on pruned HTML...\n\n`);
-      const ai = new GoogleGenAI({ apiKey });
+      res.write(`> ⚠️ **Pipeline Fallback Switch**: Running ${modelLabel} layout synthesis on pruned HTML...\n\n`);
+      const ai = createGeminiClient(apiKey);
       const responseStream = await generateContentStreamWithRetry(
         ai,
         {
-          model: "gemini-3.6-flash",
+          model: selectedVisionModel,
           contents: [
             {
               text: `Extract this cleaned article HTML into well-structured Markdown. Omit any remaining navigation or ads.\n\nURL: ${url}\n\n${readability.cleanedHtml}`,

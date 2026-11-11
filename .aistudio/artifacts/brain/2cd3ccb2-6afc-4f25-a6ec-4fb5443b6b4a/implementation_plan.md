@@ -1,91 +1,47 @@
-# Production Hardening, Security, Resiliency & Quality Audit Plan
+# Complex PDF Accuracy, Spatial Column Reconstruction & Noise Elimination Plan
 
-Deliver a comprehensive full-stack production hardening pass across security, data persistence, error boundaries, server resiliency, pipeline consistency, and accessibility based on a complete architectural audit of the codebase.
-
-## User Review & Critical Decisions
-
-> [!IMPORTANT]
-> The following production hardening decisions incorporate your confirmed selections from Phase 1:
-
-- **Confirmed Decision 1 — Full-Stack Production Hardening**: Remediate all identified security, error boundary, resiliency, consistency, and accessibility findings across both the Express backend and React frontend.
-- **Confirmed Decision 2 — Persistent Disk Storage for API Keys & Audit Logs**: Persist API keys, sliding-window quota configurations, and request audit logs to disk (`.data/remote-api-store.json` with atomic write-and-rename and debounced flush) so server restarts preserve all keys and traffic history.
-- **Confirmed Decision 3 — Secured `/api/v1/admin/*` Management Routes**: Protect all `/api/v1/admin/*` endpoints against cross-origin abuse using strict same-origin / `Sec-Fetch-Site` verification (for the local browser Developer Console) or a valid `X-Admin-Token` / master `REMOTE_API_KEY` header for authorized administrative callers.
+## 1. Root-Cause Summary
+The defects observed in your test output were caused by three interacting issues:
+1. **Unconditional Tesseract OCR on Digital PDFs**: `liteparseEngine.ts` ran `ocrEnabled: true` on native digital PDFs, causing Tesseract to OCR decorative vector icons, logos, and emblems into meaningless symbol strings (`a =)`, `»=//`, `=]`, `w=]`, `m=]`, `hs`, `AN`, `2S`, `ll`) and emit dead image tags (`![](img_p1_2.png)`).
+2. **Scrambled Multi-Column Table Heuristic & Detached PDF Layer Coordinates**: LiteParse's built-in markdown formatter treated Page 1's 2-column layout + bar chart as a 4-column table, slicing sentences horizontally across cells. On Page 2, colored inline emphasis (`"NCD guidelines"`, `"respectively."`, `"patients. The budget"`) and quote lines were stored in separate PDF drawing layers and output out of vertical sequence.
+3. **Model Alias Fallback Gap**: When an API key lacked access to preview model IDs or when no server key was configured, `/api/convert` fell back to LiteParse's raw `structuredMarkdown` while `cleanMarkdownOutput()` hid the fallback warning banner.
 
 ---
 
-## 1. Overview & Audit Findings Summary
-
-Our audit evaluated the application across **7 production readiness pillars**:
-
-1. **Security & Cryptography**:
-   - *Finding*: API key comparisons used standard string equality (`===`), and SSRF validation in `remoteApi.ts` checked hostnames without blocking private IPv4/IPv6 CIDR ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `fc00::/7`, `fe80::/10`). Additionally, `/api/v1/admin/*` routes inherited the wildcard `Access-Control-Allow-Origin: *` policy.
-   - *Remediation*: Implement constant-time `crypto.timingSafeEqual` key verification, unify a comprehensive IPv4/IPv6 SSRF guard across all URL-fetching routes, restrict `/api/v1/admin/*` with same-origin + `X-Console-Client` / admin token verification, and add baseline HTTP security headers (`X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Request-Id`).
-2. **Durability & State Persistence**:
-   - *Finding*: API keys and traffic audit logs were stored strictly in volatile memory and reset whenever the server restarted.
-   - *Remediation*: Implement an atomic JSON persistence layer (`.data/remote-api-store.json`) with automatic hydration on startup and debounced non-blocking disk writes.
-3. **Consistency & Pipeline Unification**:
-   - *Finding*: The Remote API's `/api/v1/mcp/*` endpoints returned static stub responses for `search_okf_concepts`, `get_okf_concept`, `traverse_okf_graph`, and `/api/v1/mcp/query` instead of querying the live `currentKnowledgeBase` state in `mcp.ts`.
-   - *Remediation*: Extract a shared Knowledge Base store module so `/api/mcp/*` and `/api/v1/mcp/*` operate on the exact same live OKF concepts, graph edges, and resources.
-4. **Backend Resiliency & Global Error Handling**:
-   - *Finding*: Malformed JSON payloads (`SyntaxError` from `express.json()`) or unhandled async errors returned default HTML stack traces instead of structured JSON, and `server.ts` lacked `SIGTERM`/`SIGINT` graceful shutdown handlers.
-   - *Remediation*: Add a global Express JSON error-handling middleware that catches payload parse errors (`400 INVALID_JSON_PAYLOAD`) and unexpected exceptions (`500 INTERNAL_SERVER_ERROR`) without leaking stack traces, plus graceful server shutdown hooks.
-5. **Frontend Error Boundaries**:
-   - *Finding*: While the main document views in `App.tsx` were wrapped in `<ErrorBoundary>`, the 11 interactive modals (`RemoteApiModal`, `SemanticCrawlModal`, `StrictJsonExtractorModal`, `SiteMapperModal`, `BatchUrlScraperModal`, `SearchAndScrapeModal`, `VectorPrepModal`, `AstExplorerModal`, `ConvertUrlModal`, `ApiKeyModal`, `LexiconConfigModal`) were rendered outside error boundaries—meaning a rendering exception inside any modal would crash the entire application.
-   - *Remediation*: Wrap all modal subsystems in isolated `<ErrorBoundary>` containers with recovery actions.
-6. **Usability, Keyboard Navigation & UTF-8 Safety**:
-   - *Finding*: `RemoteApiModal` used raw `btoa()` which throws `InvalidCharacterError` on Unicode strings, lacked `Escape` key dismissal, and did not validate JSON syntax in the Interactive Explorer before sending POST requests.
-   - *Remediation*: Use UTF-8 safe `TextEncoder` base64 encoding, add `Escape` key listener and `role="dialog"` / `aria-modal="true"` attributes, and validate JSON payloads client-side with clear inline feedback before dispatching POST requests.
+## 2. Digital-First PDF Extraction & Artifact Sanitizer (`server/utils/liteparseEngine.ts` & `src/utils/markdownCleaner.ts`)
+* **Digital-First Vector Extraction (`ocrEnabled: false` Default)**:
+  * Run LiteParse with `ocrEnabled: false` first (completes in ~50ms on digital PDFs with zero icon/logo OCR noise).
+  * Only invoke `ocrEnabled: true` if a page is genuinely a scanned image (`< 25` digital words extracted per page).
+* **Comprehensive PDF Artifact & Noise Filter**:
+  * Strip dead local image references (`!\[[^\]]*\]\(img_p\d+_\d+\.[a-z0-9]+\)`).
+  * Strip OCR icon/glyph noise clusters (`a =)`, `»=//`, `=]`, `“=`, `=|`, `w=]`, `m=]`, `/\\`, isolated icon bullets) and replacement characters (`\uFFFD`).
+  * Detect and reject malformed pseudo-tables where multi-column prose paragraphs were erroneously wrapped into Markdown table cells.
 
 ---
 
-## 2. User Experience & Visual Design
-
-- **Key User Flows**:
-  - **Seamless Recovery in Modals**: If any modal encounters an unexpected runtime error, an isolated Error Boundary card appears inside the modal overlay with a **Reset & Close** button, keeping the user's converted Markdown and workspace state intact.
-  - **Pre-Flight JSON Validation in API Explorer**: When editing JSON request bodies in the Interactive Explorer, malformed JSON is immediately flagged with a crisp diagnostic message before the request is sent.
-  - **Keyboard & Accessibility Ergonomics**: Pressing `Esc` cleanly closes active modals; all interactive controls include accessible titles, `focus-visible` rings, and tabular numeral alignment (`tabular-nums`).
-- **Visual Identity & Theme**:
-  - Preserves the high-contrast dark zinc developer console aesthetic (`bg-zinc-950`, `bg-zinc-900`, `border-zinc-800`, emerald/amber/cyan/rose semantic status indicators, and `font-mono tabular-nums` telemetry).
-
----
-
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decision 1: Atomic Disk Persistence vs. External Database**
-  - *Chosen Approach*: Store API keys, rate-limit settings, and recent audit logs in `.data/remote-api-store.json` using atomic temp-file write + rename and debounced saves.
-  - *Why*: Zero external infrastructure dependencies, instant startup hydration, crash-safe writes, and full compatibility with containerized environments.
-- **Decision 2: Same-Origin + Custom Header Guard for `/api/v1/admin/*`**
-  - *Chosen Approach*: Split CORS policies so `/api/v1/admin/*` rejects cross-origin browser requests (`Sec-Fetch-Site: cross-site` or mismatched `Origin`) unless authenticated with a valid `Authorization: Bearer <MASTER_KEY>` or `X-Console-Client: okf-internal-console` from the same host.
-  - *Why*: Prevents malicious third-party websites from silently enumerating or revoking a user's API keys via cross-origin `fetch()` calls while keeping the in-app Developer Console seamless.
+## 3. 2D Spatial Column, Quote & Chart Reconstructor (`server/utils/pdfSpatialReconstructor.ts`)
+Build a dedicated 2D spatial geometry engine that consumes the `(x, y, width, height, fontSize, fontName)` text items from each page and reconstructs true semantic reading order before AI grounding or local output:
+1. **Page Zone Segmentation**:
+   * **Header Banner Zone**: Top full-width metadata (`Policy Brief`, `January 2023`, Title, Subtitle/Attribution).
+   * **Column Split Detection**: Automatically compute the vertical column gutter (`splitX`) for both symmetrical 50/50 columns (Page 2) and asymmetrical 62/38 main-plus-sidebar layouts (Page 1 `Background` + `Key Findings` callout box).
+   * **Footer & Reference Zone**: Bottom full-width numbered citations (`1.`, `2.`, `3.`), footnotes (`*WHO Health System Building Blocks`, `*CHORUS is funded...`), and partner attributions.
+2. **Y-Band Line Clustering & Left-to-Right Stitching**:
+   * Group text items within each column whose vertical baselines fall within `±4.5pt` into a single horizontal line sorted strictly by `x` coordinate.
+   * This re-attaches inline phrases drawn in separate PDF operations (such as `"NCD guidelines"` in *Service Delivery*, `"respectively."` in *Drugs and Equipment*, and `"patients. The budget"` in *Health Financing*) directly into their exact sentence position.
+3. **Semantic Sub-Section & Quote Grouping**:
+   * Within each column stream, identify domain subheadings (`Service Delivery:`, `Health Workforce:`, `Drugs and Equipment:`, `Health Financing:`, `Health Information System:`, `Leadership and Governance:`) and ensure the `###` heading always precedes its body paragraph.
+   * Stitch cross-column continuations (e.g., `Health Information System` starting at the bottom of Page 2 Column 1 and continuing at the top of Page 2 Column 2).
+   * Group italicized/quoted lines (`"..."`) with their bracketed speaker role (`[Policy Maker, MoLGRDC]`, `[Project Manager_Urban PHC Centre]`, `[Health Care Provider_Urban PHC Centre]`, `[Policy Maker_MoHFW]`) into clean attributed blockquotes:
+     `> *"..."* — **[Speaker Role]**`
+4. **Spatial Chart-to-GFM Table Reconstruction**:
+   * Reconstruct embedded charts (`Figure: Non Communicable Disease (NCD) Risk Factor Prevalence (Urban vs Rural)` and `Figure: Domain Indices across Facilities`) by spatially pairing X-axis category labels with their corresponding series/percentage values into aligned GFM tables.
 
 ---
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
-
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                        Express Server (server.ts)                          │
-│  • Security Headers (X-Content-Type-Options, Referrer-Policy, X-Request-Id)│
-│  • Global JSON Error Boundary Middleware (400 Bad JSON / 500 Safe Error)   │
-│  • Graceful Shutdown Handler (SIGTERM / SIGINT)                            │
-└───────────────┬────────────────────────────────────────┬───────────────────┘
-                │                                        │
-                ▼                                        ▼
-┌───────────────────────────────────────┐  ┌─────────────────────────────────┐
-│   Admin Guard (/api/v1/admin/*)       │  │ Remote Gateway (/api/v1/*)      │
-│  • Same-Origin / Sec-Fetch-Site Check │  │  • Wildcard CORS for 3P Clients │
-│  • X-Console-Client / Admin Auth      │  │  • Timing-Safe Key Verification │
-└───────────────┬───────────────────────┘  │  • Sliding-Window Rate Limiter  │
-                │                          │  • Unified IPv4/IPv6 SSRF Guard │
-                ▼                          └─────────────┬───────────────────┘
-┌────────────────────────────────────────────────────────┴───────────────────┐
-│              Shared Core Stores & Persistent Disk Layer                    │
-│  • .data/remote-api-store.json (Atomic Write + Startup Hydration)          │
-│  • Shared OKF Knowledge Base Store (Unifies /api/mcp & /api/v1/mcp)        │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Interactive Component & State Mapping**:
-  - **Unified SSRF Guard**: Centralizes `validateSafeRemoteUrl(url)` in `urlValidator.ts` blocking loopback, link-local, RFC 1918 private IPv4 ranges, IPv6 unique-local/link-local addresses, and cloud metadata endpoints across both `convert.ts` and `remoteApi.ts`.
-  - **Shared MCP Knowledge Base**: Synchronizes concepts across the UI's Multi-Doc Studio, `/api/mcp/*`, and `/api/v1/mcp/*` so remote agents can search, read, and traverse the active knowledge graph.
-  - **Modal Error Boundaries & Keyboard UX**: Wraps modal instances in `App.tsx` with `<ErrorBoundary>` and adds `Escape` key handling and pre-flight JSON validation in `RemoteApiModal.tsx`.
+## 4. Resilient Multi-Model Gemini Vision Pipeline (`server/utils/geminiService.ts` & `server/routes/convert.ts`)
+* **Multi-Model Compatibility Chain**:
+  * Set **Gemini 4 Pro (`gemini-4-argon`)** and **Gemini 3.8 Flash (`gemini-3.8-flash`)** as primary multimodal vision models, with an automatic compatibility fallback chain:
+    `gemini-4-argon` $\rightarrow$ `gemini-3.8-flash` $\rightarrow$ `gemini-2.5-pro` $\rightarrow$ `gemini-2.5-flash`.
+  * If a user's external BYOK key returns `404 Model Not Found` or `403 Permission Denied` on a preview alias, the retry engine immediately switches to the next available multimodal model in the chain without dropping the request.
+* **Clean Grounding Anchor & Offline Resilience**:
+  * Pass the clean **2D Spatially Reconstructed Markdown** (instead of raw LiteParse output) as the structural anchor to Gemini Vision, and use it as the deterministic output whenever no API key is configured.

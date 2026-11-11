@@ -1,6 +1,8 @@
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import { extractPdfPageByPageText } from "./pdfUtils";
+import { parsePdfWithLiteParse } from "./liteparseEngine";
+import { sanitizePdfTextArtifacts } from "./pdfSpatialReconstructor";
 import { convertHtmlToMarkdownPandoc } from "./pandocEngine";
 import { convertWithAnydoc } from "./anydocEngine";
 import { extractCleanArticleHtml, ReadabilityOptions } from "./readabilityExtractor";
@@ -23,7 +25,7 @@ export function convertCsvToMarkdownTable(csvText: string): string {
       const char = rowStr[i];
       if (char === '"' || char === "'") {
         inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
+      } else if (char === "," && !inQuotes) {
         result.push(current.trim());
         current = "";
       } else {
@@ -53,7 +55,7 @@ export async function convertHtmlToMarkdownBasic(html: string): Promise<string> 
   return markdown;
 }
 
-// Local fallback conversion when Gemini API is unavailable or returns an invalid API key
+// Local deterministic conversion with 2D Spatial PDF Reconstruction first for PDFs
 export async function convertDocumentLocally(
   fileName: string,
   fileType: string,
@@ -64,24 +66,25 @@ export async function convertDocumentLocally(
     const lowerType = (fileType || "").toLowerCase();
     const buffer = Buffer.from(base64Data, "base64");
 
-    // Fast-path: Attempt Firecrawl anydoc high-performance conversion engine
-    const anydocRes = await convertWithAnydoc(buffer, fileName, fileType);
-    if (anydocRes.success && anydocRes.markdown && anydocRes.markdown.trim().length > 10) {
-      return anydocRes.markdown;
-    }
-
-    // 0. PDF Document (.pdf)
-    if (
-      lowerType.includes("pdf") ||
-      lowerName.endsWith(".pdf")
-    ) {
+    // 0. PDF Document (.pdf) -> Always use 2D Spatial Column & Chart Reconstructor first
+    if (lowerType.includes("pdf") || lowerName.endsWith(".pdf")) {
+      const liteResult = await parsePdfWithLiteParse(buffer, fileName, 75);
+      if (liteResult.markdown && liteResult.markdown.trim().length > 20) {
+        return sanitizePdfTextArtifacts(liteResult.markdown);
+      }
       const { structuredMarkdown, pageText } = await extractPdfPageByPageText(buffer, fileName);
       if (structuredMarkdown && structuredMarkdown.trim()) {
-        return structuredMarkdown;
+        return sanitizePdfTextArtifacts(structuredMarkdown);
       }
       if (pageText && pageText.trim()) {
-        return pageText;
+        return sanitizePdfTextArtifacts(pageText);
       }
+    }
+
+    // Fast-path for non-PDF documents: Attempt Firecrawl anydoc high-performance conversion engine
+    const anydocRes = await convertWithAnydoc(buffer, fileName, fileType);
+    if (anydocRes.success && anydocRes.markdown && anydocRes.markdown.trim().length > 10) {
+      return sanitizePdfTextArtifacts(anydocRes.markdown);
     }
 
     // 1. Spreadsheet (.xlsx, .xls, .csv)
@@ -131,11 +134,7 @@ export async function convertDocumentLocally(
     }
 
     // 3. HTML Document
-    if (
-      lowerType.includes("html") ||
-      lowerName.endsWith(".html") ||
-      lowerName.endsWith(".htm")
-    ) {
+    if (lowerType.includes("html") || lowerName.endsWith(".html") || lowerName.endsWith(".htm")) {
       const text = buffer.toString("utf-8");
       return await convertHtmlToMarkdownBasic(text);
     }
@@ -158,5 +157,3 @@ export async function convertDocumentLocally(
   }
   return null;
 }
-
-

@@ -1,7 +1,6 @@
 import { Router } from "express";
-import { GoogleGenAI } from "@google/genai";
 import { SentimentAnalyzer, TextStatistics, LanguageDetector, KeywordExtractor } from "textanalysis-tool";
-import { getGeminiApiKey, getFriendlyErrorMessage, generateContentStreamWithRetry } from "../utils/geminiService";
+import { createGeminiClient, getGeminiApiKey, getFriendlyErrorMessage, generateContentStreamWithRetry } from "../utils/geminiService";
 
 const router = Router();
 
@@ -92,7 +91,7 @@ router.get("/agent/info", (req, res) => {
   const hasApiKey = Boolean(getGeminiApiKey());
   res.json({
     status: "active",
-    model: "gemini-3.6-flash",
+    model: "gemini-3.8-flash",
     skill: "okf-open-knowledge-format",
     specification: "https://okf.md/spec/",
     hasApiKey,
@@ -121,14 +120,7 @@ router.post("/agent/okf", async (req, res) => {
       });
     }
 
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
+    const ai = createGeminiClient(apiKey);
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
@@ -192,11 +184,10 @@ Respond as an OKF-trained AI Agent using knowledge blocks and clean Markdown.`;
     }
 
     const responseStream = await generateContentStreamWithRetry(ai, {
-      model: "gemini-3.6-flash",
+      model: "gemini-3.8-flash",
       contents: prompt,
       config: {
         systemInstruction: okfSkillInstruction,
-        temperature: 0.3,
       },
     });
 

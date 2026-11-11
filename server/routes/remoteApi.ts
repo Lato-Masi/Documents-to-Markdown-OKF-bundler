@@ -11,7 +11,6 @@
  */
 
 import { Router, Request, Response, NextFunction } from "express";
-import { GoogleGenAI } from "@google/genai";
 import { SentimentAnalyzer, TextStatistics, LanguageDetector, KeywordExtractor } from "textanalysis-tool";
 import {
   createRemoteApiKey,
@@ -30,7 +29,15 @@ import {
   constantTimeStringEquals,
 } from "../utils/apiKeyManager";
 import { generateOpenApiSpec } from "../utils/openApiSpec";
-import { getGeminiApiKey, getFriendlyErrorMessage, generateContentWithRetry } from "../utils/geminiService";
+import {
+  createGeminiClient,
+  getGeminiApiKey,
+  getFriendlyErrorMessage,
+  generateContentWithRetry,
+  resolveVisionModel,
+  getVisionModelDisplayName,
+  buildComplexPdfSemanticPrompt,
+} from "../utils/geminiService";
 import { convertDocumentLocally } from "../utils/localConverter";
 import { parsePdfWithLiteParse } from "../utils/liteparseEngine";
 import { fetchRenderedPage } from "../utils/playwrightFetcher";
@@ -378,6 +385,7 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
       conversionMode = "standard",
       targetStyle = "gfm",
       qualityThreshold = 75,
+      visionModel,
       customApiKey,
     } = req.body;
 
@@ -390,10 +398,23 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
 
     const buffer = Buffer.from(base64Data, "base64");
     const isPdf = fileType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf");
+    const selectedVisionModel = resolveVisionModel(visionModel);
+    const modelLabel = getVisionModelDisplayName(selectedVisionModel);
+    const headerGeminiKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
+    const geminiKey = getGeminiApiKey(headerGeminiKey);
 
     if (isPdf) {
       const liteResult = await parsePdfWithLiteParse(buffer, fileName, qualityThreshold);
-      if (liteResult.markdown && liteResult.markdown.trim().length > 20) {
+      const shouldFastPath =
+        conversionMode === "text-only" ||
+        (conversionMode !== "rich" &&
+          liteResult.quality.isSatisfactory &&
+          !liteResult.quality.requiresMultimodalVision &&
+          liteResult.quality.detectedColumns < 2 &&
+          !liteResult.quality.hasEmbeddedCharts &&
+          !liteResult.quality.hasComplexSemantics);
+
+      if ((shouldFastPath || !geminiKey) && liteResult.markdown && liteResult.markdown.trim().length > 20) {
         return sendApiResponse(req, res, {
           fileName,
           fileType: "application/pdf",
@@ -402,6 +423,50 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
           spatialQuality: liteResult.quality,
           totalPages: liteResult.totalPages,
           markdown: liteResult.markdown,
+        });
+      }
+
+      if (geminiKey) {
+        const ai = createGeminiClient(geminiKey);
+        const pdfPrompt = buildComplexPdfSemanticPrompt({
+          fileName,
+          totalPages: liteResult.totalPages,
+          qualityScore: liteResult.quality.qualityScore,
+          threshold: qualityThreshold,
+          detectedColumns: liteResult.quality.detectedColumns,
+          reasons: liteResult.quality.reasons,
+          modeInstructions:
+            conversionMode === "rich"
+              ? "Include high-detail structural extraction, extra callouts, diagrams, key points, tables, and full context summaries."
+              : "Standard faithful document conversion preserving full structural and semantic accuracy.",
+          styleInstructions: "Format as GitHub Flavored Markdown (GFM) with aligned tables and attributed blockquotes.",
+          structuredMarkdown: liteResult.markdown,
+          pdfTextReference: liteResult.rawText,
+        });
+
+        const response = await generateContentWithRetry(ai, {
+          model: selectedVisionModel,
+          contents: [
+            {
+              inlineData: {
+                mimeType: "application/pdf",
+                data: base64Data,
+              },
+            },
+            { text: pdfPrompt },
+          ],
+        });
+
+        const markdown = (response.text || liteResult.markdown || "").trim();
+        return sendApiResponse(req, res, {
+          fileName,
+          fileType: "application/pdf",
+          engine: `${modelLabel} Multimodal Semantic Engine`,
+          visionModelUsed: selectedVisionModel,
+          wordCount: markdown.split(/\s+/).filter(Boolean).length,
+          spatialQuality: liteResult.quality,
+          totalPages: liteResult.totalPages,
+          markdown,
         });
       }
     }
@@ -418,8 +483,6 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
       });
     }
 
-    const headerGeminiKey = (req.headers["x-gemini-api-key"] as string) || customApiKey;
-    const geminiKey = getGeminiApiKey(headerGeminiKey);
     if (!geminiKey) {
       return res.status(422).json({
         success: false,
@@ -431,11 +494,11 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey: geminiKey });
+    const ai = createGeminiClient(geminiKey);
     const prompt = `Convert this document (${fileName}, mode: ${conversionMode}, style: ${targetStyle}) into clean, faithful Markdown. Output only the raw Markdown content without outer code fences.`;
 
     const response = await generateContentWithRetry(ai, {
-      model: "gemini-2.5-flash",
+      model: selectedVisionModel,
       contents: [
         { text: prompt },
         {
@@ -451,7 +514,8 @@ router.post("/v1/convert/file", async (req: Request, res: Response) => {
     return sendApiResponse(req, res, {
       fileName,
       fileType,
-      engine: "Gemini Multimodal Engine",
+      engine: `${modelLabel} Multimodal Engine`,
+      visionModelUsed: selectedVisionModel,
       wordCount: markdown.split(/\s+/).filter(Boolean).length,
       markdown,
     });
@@ -724,7 +788,7 @@ router.post("/v1/okf/agent", async (req: Request, res: Response) => {
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createGeminiClient(apiKey);
     const systemInstruction = `You are an expert Open Knowledge Format (OKF v1.0) Agent. Structure knowledge into semantic blocks (:::summary, :::concept, :::procedure, :::code, :::table, :::note, :::faq, :::reference) with valid YAML frontmatter and [[Wiki Links]].`;
 
     let prompt = "";
@@ -739,9 +803,9 @@ router.post("/v1/okf/agent", async (req: Request, res: Response) => {
     }
 
     const response = await generateContentWithRetry(ai, {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.8-flash",
       contents: prompt,
-      config: { systemInstruction, temperature: 0.2 },
+      config: { systemInstruction },
     });
 
     return sendApiResponse(req, res, {

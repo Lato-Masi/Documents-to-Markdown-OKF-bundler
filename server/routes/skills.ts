@@ -1,12 +1,11 @@
 import { Router } from "express";
-import { GoogleGenAI } from "@google/genai";
 import { sliceMonolithToAgentSkill, computeProgressiveDisclosureMetrics } from "../../src/lib/skillProceduralSlicer";
 import { validateAgentSkill } from "../../src/lib/skillValidator";
 import { auditAgentSkillBestPractices } from "../../src/lib/agentSkillBestPracticesEngine";
 import { classifyTextLogic } from "../../src/lib/logicClassifier";
 import { exportAgentSkillAsZip } from "../../src/utils/skillZipExporter";
 import { AgentSkillPackage } from "../../src/types/agentSkill";
-import { getGeminiApiKey, getFriendlyErrorMessage, generateContentWithRetry } from "../utils/geminiService";
+import { createGeminiClient, getGeminiApiKey, getFriendlyErrorMessage, generateContentWithRetry } from "../utils/geminiService";
 import { estimateTokens } from "../../src/utils/tokenEstimator";
 
 const router = Router();
@@ -112,7 +111,7 @@ router.post("/skills/enhance-with-gemini", async (req, res) => {
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createGeminiClient(apiKey);
 
     // Build token-compact prompt to minimize LLM token consumption
     const prompt = `You are an expert AI Architect specializing in Agent Skills specifications (agentskills.io) and Anthropic Claude Agent Skills best practices.
@@ -146,11 +145,10 @@ Instructions for Enhancement:
 }`;
 
     const response = await generateContentWithRetry(ai, {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.8-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        temperature: 0.2,
       },
     });
 

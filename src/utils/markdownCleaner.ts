@@ -1,9 +1,9 @@
 /**
- * Comprehensive Markdown Cleaning Utility
- * 
+ * Comprehensive Markdown Cleaning & PDF Artifact Sanitization Utility
+ *
  * Ensures that converted document Markdown contains ONLY the pure extracted document content
  * and removes all internal server telemetry, pipeline stage banners, heartbeat markers,
- * sliding-window headers, and completion trailers.
+ * dead local image references (e.g. ![](img_p1_2.png)), and OCR icon symbol noise.
  */
 
 export function cleanMarkdownOutput(rawText: string): string {
@@ -17,7 +17,7 @@ export function cleanMarkdownOutput(rawText: string): string {
   // 2. Remove server stage, heartbeat, model retry, and pipeline fallback banner tags
   cleaned = cleaned.replace(/^>\s*\[(?:Server Stage|Server Heartbeat|Server Error|Gemini Model Retry).*?$\n?/gm, "");
   cleaned = cleaned.replace(
-    /^>\s*\*\*(?:LiteParse|Phase|Sliding Window|Quality Escalation|Fast Deterministic|Fast Direct|Pipeline Fallback|Conversion Failure|Conversion Error).*?\*\*.*?$\n?/gm,
+    /^>\s*\*\*(?:LiteParse|Phase|Sliding Window|Quality Escalation|Multimodal Layout Escalation|Fast Deterministic|Fast Direct|Pipeline Fallback|Conversion Failure|Conversion Error).*?\*\*.*?$\n?/gm,
     ""
   );
 
@@ -35,7 +35,16 @@ export function cleanMarkdownOutput(rawText: string): string {
     ""
   );
 
-  // 5. If the entire content is wrapped inside a single Markdown code block (```markdown ... ```), unwrap it
+  // 5. Remove dead local image tags emitted by PDF extractors (e.g. ![](img_p1_2.png))
+  cleaned = cleaned.replace(/!\[[^\]]*\]\((?:img_p\d+_\d+|page_\d+)[^)]*\)\s*/gi, "");
+
+  // 6. Remove standalone OCR icon noise lines (e.g. "a =)", "»=//", "=]", "“=", "=|", "w=]", "m=]", "hs", "AN", "2S", "ll")
+  cleaned = cleaned.replace(
+    /^\s*(?:a\s*=\)|»=\/\/|=]|“=|=\||w=]|m=]|n=|\/\\|2S|ll|o|0|=\)|=\/\/|®|hs|AN|nv)\s*$/gm,
+    ""
+  );
+
+  // 7. If the entire content is wrapped inside a single Markdown code block (```markdown ... ```), unwrap it
   const trimmed = cleaned.trim();
   if (
     (trimmed.startsWith("```markdown\n") || trimmed.startsWith("```md\n")) &&
@@ -44,6 +53,8 @@ export function cleanMarkdownOutput(rawText: string): string {
     cleaned = trimmed.replace(/^```(?:markdown|md)\r?\n/i, "").replace(/\r?\n```$/, "");
   }
 
-  // 6. Clean multiple consecutive blank lines at the beginning or end
+  // 8. Collapse 3+ consecutive blank lines into 2
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+
   return cleaned.trim();
 }

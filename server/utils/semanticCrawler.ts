@@ -12,7 +12,7 @@
  * - Master Knowledge Base compiler with Table of Contents, cross-links & section frontmatter
  */
 
-import { GoogleGenAI } from "@google/genai";
+import { createGeminiClient } from "./geminiService";
 import { parseRobotsTxt, RobotsTxtInfo } from "./siteDiscoveryEngine";
 import { fetchRenderedPage } from "./playwrightFetcher";
 import { extractCleanArticleHtml } from "./readabilityExtractor";
@@ -155,7 +155,7 @@ async function evaluateLinksWithGemini(
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createGeminiClient(apiKey);
     const prompt = `You are an AI Semantic Web Crawler building a coherent, high-density Knowledge Base for the Open Knowledge Framework (OKF).
 We just converted this webpage:
 Title: "${pageTitle}"
@@ -173,7 +173,7 @@ Reject generic navigation duplicates, pricing, marketing fluff, or irrelevant se
 Return ONLY a JSON array of selected URL strings, e.g. ["https://.../concept1", "https://.../concept2"].`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-3.8-flash",
       contents: [{ text: prompt }],
       config: {
         responseMimeType: "application/json",

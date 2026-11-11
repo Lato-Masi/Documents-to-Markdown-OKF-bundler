@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { createGeminiClient } from "./geminiService";
 import { fetchRenderedPage } from "./playwrightFetcher";
 import { isSafeUrlForFetching } from "./siteDiscoveryEngine";
 import { extractCleanArticleHtml } from "./readabilityExtractor";
@@ -42,7 +42,7 @@ export async function executeSearchAndScrape(
     throw new Error("Gemini API key is required for Search & Scrape operations.");
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = createGeminiClient(apiKey);
   const maxSources = Math.min(Math.max(1, options.maxSources || 4), 8);
 
   const searchDirective = options.domainFilter
@@ -57,7 +57,7 @@ Please provide:
 2. A distinct section at the end titled '### Extracted Web Sources' listing the exact URLs and page titles of the primary web sources used.`;
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.8-flash",
     contents: searchPrompt,
     config: {
       tools: [{ googleSearch: {} }],

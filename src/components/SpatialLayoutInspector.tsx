@@ -90,7 +90,12 @@ export default function SpatialLayoutInspector({
   }
 
   const { quality } = spatialData;
-  const isSatisfactory = quality.qualityScore >= threshold;
+  const isSatisfactory =
+    !quality.requiresMultimodalVision &&
+    quality.detectedColumns < 2 &&
+    !quality.hasEmbeddedCharts &&
+    !quality.hasComplexSemantics &&
+    quality.qualityScore >= threshold;
   const pageWidth = currentPage?.width || 612;
   const pageHeight = currentPage?.height || 792;
   const scale = 520 / pageWidth;
@@ -140,7 +145,7 @@ export default function SpatialLayoutInspector({
               ) : (
                 <>
                   <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  <span>AI Escalated</span>
+                  <span>Multimodal Vision Escalated</span>
                 </>
               )}
             </div>
@@ -152,7 +157,7 @@ export default function SpatialLayoutInspector({
               <span>
                 Status:{" "}
                 <strong className={isSatisfactory ? "text-emerald-400" : "text-amber-400"}>
-                  {isSatisfactory ? "Passed" : "Escalation Required"}
+                  {isSatisfactory ? "Linear Fast-Path" : "Multimodal Semantic Reconstruction"}
                 </strong>
               </span>
             </div>
@@ -188,9 +193,14 @@ export default function SpatialLayoutInspector({
             ))}
           </div>
 
-          <div className="pt-2 border-t border-zinc-800 flex items-center justify-between text-[11px] text-zinc-400">
+          <div className="pt-2 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
             <span>Detected Columns: <strong>{quality.detectedColumns}-Column</strong></span>
             <span>Lexical Accuracy: <strong>{((quality.lexicalWordRatio || 1) * 100).toFixed(1)}%</strong></span>
+            {typeof quality.filteredNoiseCount === "number" && (
+              <span className="text-emerald-400">
+                Noise Stripped: <strong>{quality.filteredNoiseCount} items</strong>
+              </span>
+            )}
           </div>
         </div>
 
@@ -207,7 +217,7 @@ export default function SpatialLayoutInspector({
               </span>
             </div>
             <p className="text-[11px] text-zinc-400 mt-1">
-              Documents scoring below this threshold escalate to Gemini 3.6 Flash multimodal vision.
+              Multi-column layouts, embedded charts, and documents below this score automatically escalate to Gemini 3.8 Flash / Gemini 4 Pro multimodal vision.
             </p>
           </div>
 

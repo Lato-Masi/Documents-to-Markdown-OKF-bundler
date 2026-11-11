@@ -5,7 +5,7 @@ import SingleDocumentView from "./components/SingleDocumentView";
 import ConversionHistory from "./components/ConversionHistory";
 import ErrorBoundary from "./components/ErrorBoundary";
 import DiagnosticConsole, { DiagnosticLog, StreamMetrics } from "./components/DiagnosticConsole";
-import { HistoryItem, ConversionMode, TargetStyle, ViewMode, SourceType, TabType, SpatialDocumentResult } from "./types";
+import { HistoryItem, ConversionMode, TargetStyle, VisionModelType, ViewMode, SourceType, TabType, SpatialDocumentResult } from "./types";
 import { getMimeTypeByExtension } from "./utils/fileHelpers";
 import { cleanMarkdownOutput } from "./utils/markdownCleaner";
 import { Sparkles, Layers, FileText, Globe, Boxes, HelpCircle, Key, Brain, Braces, Map, Search, Database, GitBranch, BookOpen, Terminal } from "lucide-react";
@@ -97,7 +97,9 @@ export default function App() {
 
   // Configuration settings
   const [conversionMode, setConversionMode] = useState<ConversionMode>("standard");
-  const [targetStyle, setTargetStyle] = useState<TargetStyle>("standard");
+  const [targetStyle, setTargetStyle] = useState<TargetStyle>("gfm");
+  const [visionModel, setVisionModel] = useState<VisionModelType>("gemini-3.8-flash");
+  const [isLoadingSamplePdf, setIsLoadingSamplePdf] = useState<boolean>(false);
 
   // Visual interface controls
   const [activeTab, setActiveTab] = useState<TabType>("preview");
@@ -132,18 +134,19 @@ export default function App() {
     const fileExt = file?.name ? file.name.split(".").pop()?.toLowerCase() : "";
     const isPdf = fileExt === "pdf" || file?.type === "application/pdf";
 
+    const modelLabel = visionModel === "gemini-4-argon" ? "Gemini 4 Pro" : "Gemini 3.8 Flash";
     const steps = isPdf
       ? [
           "[Phase 1/2] Reading & parsing PDF spatial layout...",
-          "[Phase 1/2] Analyzing PDF grid zones, sidebars & tables...",
-          "[Phase 1/2] Connecting to Gemini 3.6 Flash multimodal engine...",
-          "[Phase 1/2] Processing multi-page document structure...",
-          "[Phase 1/2] Generating clean Markdown output stream...",
+          "[Phase 1/2] Detecting multi-column grids, callout sidebars & embedded charts...",
+          `[Phase 1/2] Connecting to ${modelLabel} multimodal vision engine...`,
+          "[Phase 1/2] Reconstructing cross-column sections, GFM chart tables & attributed quotes...",
+          "[Phase 1/2] Generating clean semantic Markdown output stream...",
         ]
       : [
           "[Phase 1/2] Reading document structure...",
           "[Phase 1/2] Analyzing content grids and tables...",
-          "[Phase 1/2] Processing components with Gemini engine...",
+          `[Phase 1/2] Processing components with ${modelLabel} engine...`,
           "[Phase 1/2] Formatting syntax and lists...",
           "[Phase 1/2] Streaming clean Markdown output...",
         ];
@@ -170,7 +173,7 @@ export default function App() {
         );
       } else if (isOnlyBannerHeader) {
         setLoadingStep(
-          `Gemini 3.6 Flash AI processing multi-page document... (Pipeline initialized) • ${elapsedStr}`
+          `${modelLabel} processing complex document layout & charts... (Pipeline initialized) • ${elapsedStr}`
         );
       } else {
         const currentStep = steps[stepIdx % steps.length];
@@ -186,7 +189,7 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isLoading, convertedMarkdown, file]);
+  }, [isLoading, convertedMarkdown, file, visionModel]);
 
   // Handle Drag & Drop
   const handleDrag = (e: React.DragEvent) => {
@@ -290,6 +293,45 @@ export default function App() {
     }
   };
 
+  // Load the attached complex Policy Brief PDF sample (/assets/aistudio/ARK-Urban-Primary-Care-NCD-Policy-Brief_f91069ba.pdf)
+  const handleLoadSamplePolicyBrief = async () => {
+    setIsLoadingSamplePdf(true);
+    setError("");
+    try {
+      const sampleUrl = "/assets/aistudio/ARK-Urban-Primary-Care-NCD-Policy-Brief_f91069ba.pdf";
+      const res = await fetch(sampleUrl);
+      if (!res.ok) {
+        throw new Error(`Could not load sample PDF (${res.status})`);
+      }
+      const blob = await res.blob();
+      const sampleFile = new File(
+        [blob],
+        "ARK-Urban-Primary-Care-NCD-Policy-Brief.pdf",
+        { type: "application/pdf" }
+      );
+      setConversionMode("rich");
+      setTargetStyle("gfm");
+      setFile(sampleFile);
+      setConvertedMarkdown("");
+      setSpatialData(null);
+
+      const arrayBuf = await blob.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuf);
+      let binary = "";
+      const chunkSize = 8192;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      const base64Str = btoa(binary);
+      setBase64Data(base64Str);
+      fetchSpatialInspection(base64Str, sampleFile.name, qualityThreshold);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load sample Policy Brief PDF.");
+    } finally {
+      setIsLoadingSamplePdf(false);
+    }
+  };
+
   // Convert loaded file to markdown via backend endpoint
   const handleConvert = async () => {
     if (!file || !base64Data) {
@@ -306,7 +348,7 @@ export default function App() {
     const startMs = Date.now();
 
     clearLogs();
-    addLog("info", `Initiated POST /api/convert for file: ${file.name} (${(file.size / 1024).toFixed(1)} KB, Quality Threshold: ${qualityThreshold}%)`);
+    addLog("info", `Initiated POST /api/convert for file: ${file.name} (${(file.size / 1024).toFixed(1)} KB, Vision Model: ${visionModel}, Quality Threshold: ${qualityThreshold}%)`);
     setMetrics({
       status: "connecting",
       chunksReceived: 0,
@@ -335,6 +377,7 @@ export default function App() {
           conversionMode,
           targetStyle,
           qualityThreshold,
+          visionModel,
           customApiKey: customApiKey || undefined,
         }),
       });
@@ -497,6 +540,7 @@ export default function App() {
           url: inputUrl,
           conversionMode,
           targetStyle,
+          visionModel,
           customApiKey: customApiKey || undefined,
         }),
       });
@@ -904,6 +948,10 @@ export default function App() {
                 setConversionMode={setConversionMode}
                 targetStyle={targetStyle}
                 setTargetStyle={setTargetStyle}
+                visionModel={visionModel}
+                setVisionModel={setVisionModel}
+                onLoadSamplePolicyBrief={handleLoadSamplePolicyBrief}
+                isLoadingSamplePdf={isLoadingSamplePdf}
                 activeTab={activeTab}
                 setActiveTab={setActiveTab}
                 currentThemeId={currentThemeId}

@@ -11,6 +11,7 @@ export interface HistoryItem {
 
 export type ConversionMode = "standard" | "rich" | "text-only";
 export type TargetStyle = "standard" | "gfm" | "academic";
+export type VisionModelType = "gemini-3.8-flash" | "gemini-4-argon";
 export type ViewMode = "single" | "multi_doc" | "batch_zip";
 export type SourceType = "file" | "url";
 export type TabType = "preview" | "raw" | "ast" | "okf" | "skills" | "spatial" | "stats";
@@ -61,6 +62,13 @@ export interface SpatialQualityMetrics {
   detectedColumns: number;
   mathSymbolCount: number;
   tableMarkerCount: number;
+  hasEmbeddedCharts?: boolean;
+  hasComplexSemantics?: boolean;
+  requiresMultimodalVision?: boolean;
+  filteredNoiseCount?: number;
+  filteredDecorativeIcons?: number;
+  filteredHeaderFooterNoise?: number;
+  filteredBrokenImageTags?: number;
   reasons: string[];
 }
 

@@ -12,6 +12,10 @@ import {
   Play,
   HelpCircle,
   Archive,
+  Cpu,
+  Columns,
+  BarChart3,
+  Quote,
 } from "lucide-react";
 import MarkdownEditor from "./MarkdownEditor";
 import RenderedMarkdownPreview from "./RenderedMarkdownPreview";
@@ -22,7 +26,7 @@ import AgentSkillExplorer from "./AgentSkillExplorer";
 import DocumentInsights from "./DocumentInsights";
 import SpatialLayoutInspector from "./SpatialLayoutInspector";
 import ErrorBoundary from "./ErrorBoundary";
-import { ConversionMode, TargetStyle, TabType, SpatialDocumentResult } from "../types";
+import { ConversionMode, TargetStyle, VisionModelType, TabType, SpatialDocumentResult } from "../types";
 import { formatBytes } from "../utils/fileHelpers";
 import { convertMultipleMarkdownsToOKFBundle, exportOKFBundleAsZip, downloadZipBlob } from "../utils/okfZipExporter";
 
@@ -36,6 +40,10 @@ interface SingleDocumentViewProps {
   setConversionMode: (mode: ConversionMode) => void;
   targetStyle: TargetStyle;
   setTargetStyle: (style: TargetStyle) => void;
+  visionModel?: VisionModelType;
+  setVisionModel?: (model: VisionModelType) => void;
+  onLoadSamplePolicyBrief?: () => void;
+  isLoadingSamplePdf?: boolean;
   activeTab: TabType;
   setActiveTab: (tab: TabType) => void;
   currentThemeId: string;
@@ -69,6 +77,10 @@ export default function SingleDocumentView({
   setConversionMode,
   targetStyle,
   setTargetStyle,
+  visionModel = "gemini-3.8-flash",
+  setVisionModel,
+  onLoadSamplePolicyBrief,
+  isLoadingSamplePdf = false,
   activeTab,
   setActiveTab,
   currentThemeId,
@@ -160,60 +172,136 @@ export default function SingleDocumentView({
             Drag & drop your document here
           </h3>
           <p className="text-xs sm:text-sm text-zinc-400 mb-4 max-w-md mx-auto">
-            Supports PDF (OCR/spatial parsing), Word (.docx), Excel (.xlsx/.csv), Web HTML, Images, and Text files.
+            Supports complex multi-column PDFs (charts, callouts & attributed quotes via Gemini 3.8 Flash / Gemini 4 Pro), Word (.docx), Excel, HTML, and Images.
           </p>
-          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition shadow-md shadow-emerald-950/40">
-            <span>Browse Computer Files</span>
+          <div className="flex flex-wrap items-center justify-center gap-2.5">
+            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition shadow-md shadow-emerald-950/40">
+              <span>Browse Computer Files</span>
+            </div>
+            {onLoadSamplePolicyBrief && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onLoadSamplePolicyBrief();
+                }}
+                disabled={isLoadingSamplePdf || isLoading}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border border-indigo-700/80 font-medium text-xs transition shadow-md cursor-pointer disabled:opacity-50"
+                title="Load and extract the complex 2-column ARK Urban Primary Care NCD Policy Brief PDF with charts, callout boxes, and attributed quotes"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                <span>
+                  {isLoadingSamplePdf
+                    ? "Loading Policy Brief PDF..."
+                    : "Load Sample Complex Policy Brief PDF"}
+                </span>
+              </button>
+            )}
           </div>
         </div>
       ) : (
         /* Selected File Card & Actions */
-        <div className="bg-zinc-900/80 rounded-2xl p-4 sm:p-5 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
-          <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto">
-            <div className="p-2.5 sm:p-3 bg-zinc-800 rounded-xl text-emerald-400 border border-zinc-700/60 shadow shrink-0">
-              <FileText className="w-5 h-5 sm:w-6 sm:h-6" />
+        <div className="space-y-3">
+          <div className="bg-zinc-900/80 rounded-2xl p-4 sm:p-5 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
+            <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto">
+              <div className="p-2.5 sm:p-3 bg-zinc-800 rounded-xl text-emerald-400 border border-zinc-700/60 shadow shrink-0">
+                <FileText className="w-5 h-5 sm:w-6 sm:h-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h4 className="text-xs sm:text-sm font-semibold text-zinc-100 truncate">{file.name}</h4>
+                <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">
+                  {formatBytes(file.size)} • {file.type || "Document"}
+                </p>
+              </div>
             </div>
-            <div className="min-w-0 flex-1">
-              <h4 className="text-xs sm:text-sm font-semibold text-zinc-100 truncate">{file.name}</h4>
-              <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">
-                {formatBytes(file.size)} • {file.type || "Document"}
-              </p>
-            </div>
-          </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-            <button
-              onClick={handleClear}
-              disabled={isLoading}
-              className="flex-1 sm:flex-initial px-3.5 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/60 rounded-xl transition flex items-center justify-center gap-1.5"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-              <span>Change File</span>
-            </button>
-
-            <button
-              onClick={handleConvert}
-              disabled={isLoading}
-              className="flex-1 sm:flex-initial px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50"
-            >
-              {isLoading ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-emerald-300 shrink-0" />
-                  <span>Converting...</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-current shrink-0" />
-                  <span>Convert Document</span>
-                </>
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end flex-wrap">
+              {onLoadSamplePolicyBrief && !file.name.includes("ARK-Urban-Primary-Care") && (
+                <button
+                  type="button"
+                  onClick={onLoadSamplePolicyBrief}
+                  disabled={isLoadingSamplePdf || isLoading}
+                  className="px-3 py-2 text-xs font-medium text-indigo-300 hover:text-indigo-200 bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-800/70 rounded-xl transition flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Sample Policy Brief PDF</span>
+                </button>
               )}
-            </button>
+
+              <button
+                onClick={handleClear}
+                disabled={isLoading}
+                className="flex-1 sm:flex-initial px-3.5 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/60 rounded-xl transition flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <span>Change File</span>
+              </button>
+
+              <button
+                onClick={handleConvert}
+                disabled={isLoading}
+                className="flex-1 sm:flex-initial px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50"
+              >
+                {isLoading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin text-emerald-300 shrink-0" />
+                    <span>Converting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current shrink-0" />
+                    <span>Convert Document</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
+
+          {/* Spatial Layout Complexity Pre-Flight Banner for PDFs */}
+          {spatialData && spatialData.quality && (
+            <div className="px-4 py-3 rounded-xl bg-zinc-900/90 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
+                  <Columns className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>PDF Layout Pre-Flight:</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-200 font-mono text-[11px] border border-zinc-700">
+                  {spatialData.totalPages} {spatialData.totalPages === 1 ? "Page" : "Pages"} • {spatialData.quality.detectedColumns}-Column Grid
+                </span>
+                {spatialData.quality.hasEmbeddedCharts && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-950/80 text-amber-300 border border-amber-800/70 text-[11px] flex items-center gap-1">
+                    <BarChart3 className="w-3 h-3 text-amber-400" />
+                    <span>Embedded Charts → GFM Tables</span>
+                  </span>
+                )}
+                {spatialData.quality.hasComplexSemantics && (
+                  <span className="px-2 py-0.5 rounded-md bg-purple-950/80 text-purple-300 border border-purple-800/70 text-[11px] flex items-center gap-1">
+                    <Quote className="w-3 h-3 text-purple-400" />
+                    <span>Callouts & Attributed Quotes</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <span
+                  className={`px-2.5 py-0.5 rounded-md font-mono text-[11px] font-semibold border ${
+                    spatialData.quality.requiresMultimodalVision || conversionMode === "rich"
+                      ? "bg-emerald-950/80 text-emerald-300 border-emerald-700/70"
+                      : "bg-zinc-800 text-zinc-300 border-zinc-700"
+                  }`}
+                >
+                  {spatialData.quality.requiresMultimodalVision || conversionMode === "rich"
+                    ? `Multimodal Vision Active (${visionModel === "gemini-4-argon" ? "Gemini 4 Pro" : "Gemini 3.8 Flash"})`
+                    : `Fast Local LiteParse (${spatialData.quality.qualityScore}/100)`}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Conversion Options */}
-      <div className="p-3.5 sm:p-4 bg-zinc-900/50 rounded-2xl border border-zinc-800/80 grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 text-xs">
+      <div className="p-3.5 sm:p-4 bg-zinc-900/50 rounded-2xl border border-zinc-800/80 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 text-xs">
         <div>
           <label className="block text-zinc-400 font-medium mb-1.5 flex items-center gap-1.5 text-[11px] sm:text-xs">
             <Settings className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -255,6 +343,34 @@ export default function SingleDocumentView({
                 title={style}
               >
                 {style}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-zinc-400 font-medium mb-1.5 flex items-center gap-1.5 text-[11px] sm:text-xs">
+            <Cpu className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span>Multimodal Vision Model</span>
+          </label>
+          <div className="grid grid-cols-2 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
+            {(
+              [
+                { id: "gemini-3.8-flash", label: "3.8 Flash (Default)", desc: "High-speed native multimodal PDF & chart reasoning" },
+                { id: "gemini-4-argon", label: "Gemini 4 Pro", desc: "Deep multimodal layout & complex semantic reasoning" },
+              ] as { id: VisionModelType; label: string; desc: string }[]
+            ).map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setVisionModel && setVisionModel(m.id)}
+                className={`py-1.5 px-2 rounded-lg font-medium transition text-[11px] truncate ${
+                  visionModel === m.id
+                    ? "bg-emerald-950 text-emerald-300 border border-emerald-700/80 font-bold shadow-sm"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+                title={m.desc}
+              >
+                {m.label}
               </button>
             ))}
           </div>

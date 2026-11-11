@@ -1,3 +1,13 @@
+import {
+  reconstructPdfMarkdownFromSpatialPages,
+  sanitizePdfTextArtifacts,
+  hasBrokenImageTag,
+  stripBrokenImageTags,
+  isDecorativeIconOrSymbolItem,
+  isHeaderFooterNoiseItem,
+  normalizeMarginSignature,
+} from "./pdfSpatialReconstructor";
+
 let cachedLiteParse: any = null;
 
 async function getLiteParseClass(): Promise<any> {
@@ -56,6 +66,13 @@ export interface SpatialQualityMetrics {
   detectedColumns: number;
   mathSymbolCount: number;
   tableMarkerCount: number;
+  hasEmbeddedCharts?: boolean;
+  hasComplexSemantics?: boolean;
+  requiresMultimodalVision?: boolean;
+  filteredNoiseCount?: number;
+  filteredDecorativeIcons?: number;
+  filteredHeaderFooterNoise?: number;
+  filteredBrokenImageTags?: number;
   reasons: string[];
 }
 
@@ -82,7 +99,11 @@ function isLikelyLexicalWord(w: string): boolean {
   return true;
 }
 
-// Detect columns based on text items X coordinate clustering
+/**
+ * Detect multi-column and asymmetrical sidebar layouts on a page using both:
+ * 1. Left/Right X-coordinate clustering across symmetrical or asymmetrical (60/40) splits
+ * 2. Horizontal side-by-side text item pairs sharing similar vertical Y coordinates
+ */
 function detectColumnsOnPage(items: SpatialTextItem[], pageWidth: number): number {
   if (!items || items.length < 6 || pageWidth <= 0) return 1;
 
@@ -91,13 +112,17 @@ function detectColumnsOnPage(items: SpatialTextItem[], pageWidth: number): numbe
   let rightCount = 0;
   let centerSpanCount = 0;
 
-  for (const it of items) {
+  const meaningfulItems = items.filter((it) => (it.text || "").trim().length >= 3);
+  if (meaningfulItems.length < 6) return 1;
+
+  for (const it of meaningfulItems) {
     const itemLeft = it.x;
     const itemRight = it.x + it.width;
 
-    if (itemRight < midX - 10) {
+    // Support both symmetrical 50/50 columns and asymmetrical 65/35 policy brief sidebars
+    if (itemRight < pageWidth * 0.68 && itemLeft < midX - 15 && it.width < pageWidth * 0.68) {
       leftCount++;
-    } else if (itemLeft > midX + 10) {
+    } else if (itemLeft > pageWidth * 0.42 && it.width < pageWidth * 0.58) {
       rightCount++;
     } else {
       centerSpanCount++;
@@ -107,9 +132,31 @@ function detectColumnsOnPage(items: SpatialTextItem[], pageWidth: number): numbe
   const total = leftCount + rightCount + centerSpanCount;
   if (total === 0) return 1;
 
-  if (leftCount > 3 && rightCount > 3 && (leftCount + rightCount) / total > 0.6) {
+  if (leftCount >= 3 && rightCount >= 3 && (leftCount + rightCount) / total >= 0.42) {
     return 2;
   }
+
+  // Secondary geometric check: count distinct side-by-side text blocks on the same horizontal band
+  let sideBySideRowCount = 0;
+  const sortedByY = [...meaningfulItems].sort((a, b) => a.y - b.y);
+  for (let i = 0; i < sortedByY.length; i++) {
+    const a = sortedByY[i];
+    if (a.width > pageWidth * 0.68) continue;
+    for (let j = i + 1; j < sortedByY.length; j++) {
+      const b = sortedByY[j];
+      if (Math.abs(b.y - a.y) > 14) break;
+      const horizontalGap = Math.abs(b.x - a.x);
+      if (horizontalGap > pageWidth * 0.28 && b.width < pageWidth * 0.68) {
+        sideBySideRowCount++;
+        break;
+      }
+    }
+  }
+
+  if (sideBySideRowCount >= 4) {
+    return 2;
+  }
+
   return 1;
 }
 
@@ -126,47 +173,176 @@ export async function parsePdfWithLiteParse(
       throw new Error("LiteParse engine could not be initialized");
     }
 
-    // 1. Run JSON extraction with full spatial bounding boxes
-    const lpJson = new LiteParse({
+    // 1. Run Digital-First JSON extraction with ocrEnabled: false (fast ~50ms, zero icon OCR noise)
+    const lpDigitalJson = new LiteParse({
       outputFormat: "json",
       emitWordBoxes: true,
       extractContentBounds: true,
-      ocrEnabled: true,
+      ocrEnabled: false,
       extractLinks: true,
     });
 
-    const jsonRes = (await lpJson.parse(buffer)) as any;
-    const totalPages = jsonRes?.totalPages || jsonRes?.pages?.length || 0;
+    let jsonRes = (await lpDigitalJson.parse(buffer)) as any;
+    let totalPages = jsonRes?.totalPages || jsonRes?.pages?.length || 0;
 
-    // 2. Run Markdown extraction
-    let generatedMarkdown = "";
-    try {
-      const lpMd = new LiteParse({
-        outputFormat: "markdown",
-        ocrEnabled: true,
-      });
-      const mdRes = (await lpMd.parse(buffer)) as any;
-      if (typeof mdRes === "string") {
-        generatedMarkdown = mdRes;
-      } else if (mdRes?.markdown) {
-        generatedMarkdown = mdRes.markdown;
-      } else if (mdRes?.text) {
-        generatedMarkdown = mdRes.text;
+    // Check if the document is a scanned image PDF (< 25 digital words per page)
+    let digitalWordCount = 0;
+    if (jsonRes?.pages && Array.isArray(jsonRes.pages)) {
+      for (const p of jsonRes.pages) {
+        const itemsText = Array.isArray(p.textItems)
+          ? p.textItems.map((it: any) => it.text || "").join(" ")
+          : p.text || "";
+        digitalWordCount += itemsText.trim().split(/\s+/).filter(Boolean).length;
       }
-    } catch (mdErr) {
-      console.warn("[LiteParse] Markdown extraction notice:", mdErr);
+    }
+
+    const avgDigitalWordsPerPage = totalPages > 0 ? digitalWordCount / totalPages : 0;
+
+    // Only invoke Tesseract OCR fallback if the PDF is a scanned image (< 25 digital words/page)
+    if (totalPages > 0 && avgDigitalWordsPerPage < 25) {
+      const lpOcrJson = new LiteParse({
+        outputFormat: "json",
+        emitWordBoxes: true,
+        extractContentBounds: true,
+        ocrEnabled: true,
+        extractLinks: true,
+      });
+      jsonRes = (await lpOcrJson.parse(buffer)) as any;
+      totalPages = jsonRes?.totalPages || jsonRes?.pages?.length || totalPages;
     }
 
     const pages: SpatialPage[] = [];
     let combinedRawText = "";
+    let filteredDecorativeIcons = 0;
+    let filteredHeaderFooterNoise = 0;
+    let filteredBrokenImageTags = 0;
+
+    // Pre-scan top/bottom page margins across multi-page documents to identify repeated running headers/footers
+    const marginSignaturePageMap = new Map<string, Set<number>>();
+    if (jsonRes?.pages && Array.isArray(jsonRes.pages) && jsonRes.pages.length > 1) {
+      jsonRes.pages.forEach((p: any, idx: number) => {
+        const pNum = p.pageNum || idx + 1;
+        const pHeight = Number(p.height) || 792;
+        if (Array.isArray(p.textItems)) {
+          for (const it of p.textItems) {
+            const y = Number(it.y) || 0;
+            if (y < pHeight * 0.055 || y > pHeight * 0.935) {
+              const sig = normalizeMarginSignature(it.text || "");
+              if (sig.length >= 8) {
+                if (!marginSignaturePageMap.has(sig)) {
+                  marginSignaturePageMap.set(sig, new Set());
+                }
+                marginSignaturePageMap.get(sig)!.add(pNum);
+              }
+            }
+          }
+        }
+      });
+    }
+
+    const repeatedMarginSignatures = new Set<string>();
+    for (const [sig, pageSet] of marginSignaturePageMap.entries()) {
+      if (pageSet.size >= 2) {
+        repeatedMarginSignatures.add(sig);
+      }
+    }
 
     if (jsonRes?.pages && Array.isArray(jsonRes.pages)) {
       for (const p of jsonRes.pages) {
+        const pageWidth = Number(p.width) || 612;
+        const pageHeight = Number(p.height) || 792;
         const textItems: SpatialTextItem[] = [];
+
         if (p.textItems && Array.isArray(p.textItems)) {
           for (const item of p.textItems) {
+            const rawItemText = String(item.text || "");
+
+            // 1. Detect & strip broken image tags (e.g., ![](img_p1_2.png), img_p1_2.png)
+            if (hasBrokenImageTag(rawItemText)) {
+              filteredBrokenImageTags++;
+            }
+            const withoutImageTags = stripBrokenImageTags(rawItemText);
+            if (!withoutImageTags.trim()) {
+              continue;
+            }
+
+            // 2. Detect & filter out non-textual decorative icons, dingbat/symbol font glyphs, and OCR icon noise
+            if (
+              isDecorativeIconOrSymbolItem({
+                text: withoutImageTags,
+                fontName: item.fontName,
+                x: Number(item.x) || 0,
+                y: Number(item.y) || 0,
+                width: Number(item.width) || 0,
+                height: Number(item.height) || 0,
+                fontSize: Number(item.fontSize) || 12,
+              })
+            ) {
+              filteredDecorativeIcons++;
+              continue;
+            }
+
+            // 3. Detect & filter out repeated running headers/footers, margin page numbers, and logo watermarks
+            if (
+              isHeaderFooterNoiseItem(
+                {
+                  text: withoutImageTags,
+                  x: Number(item.x) || 0,
+                  y: Number(item.y) || 0,
+                  width: Number(item.width) || 0,
+                  height: Number(item.height) || 0,
+                  fontSize: Number(item.fontSize) || 12,
+                },
+                pageWidth,
+                pageHeight,
+                repeatedMarginSignatures
+              )
+            ) {
+              filteredHeaderFooterNoise++;
+              continue;
+            }
+
+            const cleanItemText = sanitizePdfTextArtifacts(withoutImageTags);
+            if (!cleanItemText) {
+              filteredDecorativeIcons++;
+              continue;
+            }
+
+            // Filter word-level boxes inside the spatial item as well
+            const cleanWords: SpatialWord[] = [];
+            if (Array.isArray(item.words)) {
+              for (const w of item.words) {
+                const rawWord = String(w.text || "");
+                if (hasBrokenImageTag(rawWord)) {
+                  filteredBrokenImageTags++;
+                }
+                const strippedWord = sanitizePdfTextArtifacts(stripBrokenImageTags(rawWord));
+                if (!strippedWord) continue;
+                if (
+                  isDecorativeIconOrSymbolItem({
+                    text: strippedWord,
+                    fontName: item.fontName,
+                    x: Number(w.x) || 0,
+                    y: Number(w.y) || 0,
+                    width: Number(w.width) || 0,
+                    height: Number(w.height) || 0,
+                  })
+                ) {
+                  filteredDecorativeIcons++;
+                  continue;
+                }
+                cleanWords.push({
+                  text: strippedWord,
+                  x: Number(w.x) || 0,
+                  y: Number(w.y) || 0,
+                  width: Number(w.width) || 0,
+                  height: Number(w.height) || 0,
+                });
+              }
+            }
+
             textItems.push({
-              text: item.text || "",
+              text: cleanItemText,
               x: Number(item.x) || 0,
               y: Number(item.y) || 0,
               width: Number(item.width) || 0,
@@ -174,50 +350,54 @@ export async function parsePdfWithLiteParse(
               fontName: item.fontName || "Helvetica",
               fontSize: Number(item.fontSize) || 12,
               rotation: Number(item.rotation) || 0,
-              words: (item.words || []).map((w: any) => ({
-                text: w.text || "",
-                x: Number(w.x) || 0,
-                y: Number(w.y) || 0,
-                width: Number(w.width) || 0,
-                height: Number(w.height) || 0,
-              })),
+              words: cleanWords,
             });
           }
         }
 
-        const pageText = p.text || textItems.map((t) => t.text).join(" ");
-        combinedRawText += `\n--- PAGE ${p.pageNum || pages.length + 1} ---\n` + pageText;
+        const pageNum = p.pageNum || pages.length + 1;
+        const detectedCols = detectColumnsOnPage(textItems, pageWidth);
 
-        const detectedCols = detectColumnsOnPage(textItems, p.width || 612);
-        const charDensity = pageText.length;
-
-        pages.push({
-          pageNum: p.pageNum || pages.length + 1,
-          width: p.width || 612,
-          height: p.height || 792,
+        const tempPage: SpatialPage = {
+          pageNum,
+          width: pageWidth,
+          height: pageHeight,
           contentBounds: p.contentBounds || {
             x: 0,
             y: 0,
-            width: p.width || 612,
-            height: p.height || 792,
+            width: pageWidth,
+            height: pageHeight,
           },
-          text: pageText,
-          markdown: p.markdown || "",
+          text: "",
+          markdown: "",
           textItems,
           detectedColumns: detectedCols,
-          densityScore: Math.min(100, Math.round(charDensity / 15)),
-        });
+          densityScore: 0,
+        };
+
+        // Reconstruct clean 2D spatial Markdown for this page from filtered spatial textItems
+        const pageSpatialMd = reconstructPdfMarkdownFromSpatialPages([tempPage]);
+        tempPage.markdown = pageSpatialMd;
+        tempPage.text = pageSpatialMd || textItems.map((t) => t.text).join(" ");
+        tempPage.densityScore = Math.min(100, Math.round(tempPage.text.length / 15));
+
+        combinedRawText += `\n--- PAGE ${pageNum} ---\n` + tempPage.text;
+        pages.push(tempPage);
       }
     }
 
+    // 2. Reconstruct full-document 2D spatial Markdown (columns, quotes, charts, references)
+    let generatedMarkdown = reconstructPdfMarkdownFromSpatialPages(pages);
     if (!generatedMarkdown.trim()) {
-      generatedMarkdown = pages
-        .map((p) => p.markdown || p.text)
-        .filter(Boolean)
-        .join("\n\n---\n\n");
+      generatedMarkdown = sanitizePdfTextArtifacts(
+        pages
+          .map((p) => p.markdown || p.text)
+          .filter(Boolean)
+          .join("\n\n---\n\n")
+      );
     }
 
-    // 3. Compute Quality Assessment Metrics
+    // 3. Compute Quality & Structural Complexity Metrics
     const allWords = combinedRawText
       .split(/\s+/)
       .map((w) => w.trim())
@@ -244,9 +424,25 @@ export async function parsePdfWithLiteParse(
     ).length;
 
     // Table markers
-    const tableMatches = (combinedRawText.match(/(\|[^\n]+\||^\s*[\+\-]{3,}\s*$)/gm) || []).length;
+    const tableMatches = (generatedMarkdown.match(/(\|[^\n]+\||^\s*[\+\-]{3,}\s*$)/gm) || []).length;
 
     const maxCols = pages.reduce((max, p) => Math.max(max, p.detectedColumns), 1);
+
+    // Detect embedded visual charts / figures
+    const figureLabelMatches = (
+      combinedRawText.match(/\b(Figure\s*\d*\s*:|Chart\s*\d*\s*:|Graph\s*\d*\s*:|Domain Indices|Prevalence)/gi) || []
+    ).length;
+    const percentageSeriesMatches = (combinedRawText.match(/\b\d{1,2}(\.\d{1,2})?\s*%/g) || []).length;
+    const hasEmbeddedCharts = figureLabelMatches >= 1 || percentageSeriesMatches >= 4;
+
+    // Detect complex semantic relationships: attributed participant quotes, callout sidebars, policy briefs
+    const speakerQuoteMatches = (combinedRawText.match(/\[[A-Za-z0-9_,\s\-/]{4,45}\]/g) || []).length;
+    const calloutBoxMatches = (
+      combinedRawText.match(
+        /\b(Policy Brief|Key Findings|Policy Recommendations|Executive Summary|Building Blocks)\b/gi
+      ) || []
+    ).length;
+    const hasComplexSemantics = speakerQuoteMatches >= 2 || calloutBoxMatches >= 2;
 
     // Scoring calculation
     let score = 100;
@@ -274,7 +470,7 @@ export async function parsePdfWithLiteParse(
     if (lexicalWordRatio < 0.65) {
       score -= 30;
       reasons.push(`High OCR artifact/noise ratio (${((1 - lexicalWordRatio) * 100).toFixed(1)}% non-lexical words)`);
-    } else if (lexicalWordRatio < 0.80) {
+    } else if (lexicalWordRatio < 0.8) {
       score -= 15;
       reasons.push(`Moderate non-lexical word ratio (${((1 - lexicalWordRatio) * 100).toFixed(1)}%)`);
     }
@@ -284,12 +480,44 @@ export async function parsePdfWithLiteParse(
       reasons.push(`Dense mathematical formulas (${mathMatches} symbols detected - best rendered via multimodal reasoning)`);
     }
 
+    // Penalize complex visual layouts so they automatically escalate to Gemini Multimodal Vision when an API key is active
+    if (maxCols >= 2) {
+      score -= 30;
+      reasons.push(
+        `Multi-column visual layout (${maxCols} columns / sidebars detected) — reconstructed 2D column reading order & escalating to Gemini Multimodal Vision`
+      );
+    }
+
+    if (hasEmbeddedCharts) {
+      score -= 20;
+      reasons.push(
+        `Embedded visual charts/figures detected (${figureLabelMatches} figure headers) — reconstructed GFM chart tables`
+      );
+    }
+
+    if (hasComplexSemantics) {
+      score -= 15;
+      reasons.push(
+        `Complex semantic blocks detected (${calloutBoxMatches} callout/policy headers, ${speakerQuoteMatches} attributed quotes) — reconstructed hierarchical sections`
+      );
+    }
+
+    const filteredNoiseCount =
+      filteredDecorativeIcons + filteredHeaderFooterNoise + filteredBrokenImageTags;
+    if (filteredNoiseCount > 0) {
+      reasons.push(
+        `Filtered ${filteredNoiseCount} non-textual elements from spatial payload (${filteredDecorativeIcons} decorative icons, ${filteredHeaderFooterNoise} header/footer items, ${filteredBrokenImageTags} broken image tags)`
+      );
+    }
+
     if (reasons.length === 0) {
-      reasons.push("Clean spatial typography, high text density, and well-structured reading order");
+      reasons.push("Single-column typography, high text density, and linear reading order");
     }
 
     const finalQualityScore = Math.max(0, Math.min(100, score));
-    const isSatisfactory = finalQualityScore >= qualityThreshold;
+    const requiresMultimodalVision =
+      maxCols >= 2 || hasEmbeddedCharts || hasComplexSemantics || finalQualityScore < qualityThreshold;
+    const isSatisfactory = !requiresMultimodalVision && finalQualityScore >= qualityThreshold;
 
     const quality: SpatialQualityMetrics = {
       qualityScore: finalQualityScore,
@@ -303,6 +531,13 @@ export async function parsePdfWithLiteParse(
       detectedColumns: maxCols,
       mathSymbolCount: mathMatches,
       tableMarkerCount: tableMatches,
+      hasEmbeddedCharts,
+      hasComplexSemantics,
+      requiresMultimodalVision,
+      filteredNoiseCount,
+      filteredDecorativeIcons,
+      filteredHeaderFooterNoise,
+      filteredBrokenImageTags,
       reasons,
     };
 
@@ -335,6 +570,9 @@ export async function parsePdfWithLiteParse(
         detectedColumns: 1,
         mathSymbolCount: 0,
         tableMarkerCount: 0,
+        hasEmbeddedCharts: false,
+        hasComplexSemantics: false,
+        requiresMultimodalVision: true,
         reasons: [`LiteParse execution exception: ${err?.message || "Unknown error"}`],
       },
       executionTimeMs: Date.now() - startTime,

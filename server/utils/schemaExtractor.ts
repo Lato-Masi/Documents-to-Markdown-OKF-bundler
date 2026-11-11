@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { createGeminiClient, generateContentWithRetry } from "./geminiService";
 import { fetchRenderedPage } from "./playwrightFetcher";
 import { extractCleanArticleHtml } from "./readabilityExtractor";
 import { convertDocumentLocally } from "./localConverter";
@@ -354,7 +354,7 @@ export async function executeStrictJsonExtraction(
   const promptDirective = params.extractionPrompt?.trim() || defaultPrompt;
 
   // 3. Construct Gemini system & user prompts for strict JSON schema output
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = createGeminiClient(apiKey);
 
   const systemInstruction = `You are a strict, world-class JSON data extraction engine.
 Your task is to analyze the provided document/web content and extract structured data conforming strictly to the requested JSON Schema.
@@ -377,12 +377,11 @@ ${rawText.slice(0, 75000)}
 
 Extract the structured JSON object now:`;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3.6-flash",
+  const response = await generateContentWithRetry(ai, {
+    model: "gemini-3.8-flash",
     contents: userPrompt,
     config: {
       systemInstruction,
-      temperature: 0.1, // High precision & low hallucination
       responseMimeType: "application/json",
     },
   });
@@ -413,7 +412,7 @@ Extract the structured JSON object now:`;
       inputLengthChars: rawText.length,
       outputLengthChars: JSON.stringify(parsedData).length,
       durationMs,
-      modelUsed: "gemini-3.6-flash",
+      modelUsed: "gemini-3.8-flash",
     },
   };
 }
